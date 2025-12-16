@@ -1,0 +1,51 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+*.egg-info/
+.eggs/
+
+# Build artifacts
+build/
+dist/
+*.exe
+*.spec
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Windows
+nul
+Thumbs.db
+Desktop.ini
+
+# Test output files
+test_output.xlsm
+test_output.xlsx
+full_test_output.xlsm
+test_download.zip
+test_xlwings.xlsm
+
+# Uploads folder contents
+webapp/uploads/*
+!webapp/uploads/.gitkeep
+
+# Temporary files
+*.tmp
+*.temp
+*~
+_ul
+_ul-*
+
+# Large binary template (keep the main ones)
+# Uncomment if you want to exclude Excel files
+# *.xlsm
+# *.xlsx

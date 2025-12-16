@@ -1,0 +1,195 @@
+
+================================================================================
+DNA MODEL DASHBOARD MODULE - DOCUMENTATION
+================================================================================
+Generated: December 05, 2025
+
+OVERVIEW
+--------
+The Dashboard Module provides a CFO-grade executive dashboard with comprehensive
+KPIs, financial ratios, and visualizations. It dynamically calculates metrics
+from the Source P&L and Source Balance Sheet tabs.
+
+DASHBOARD VIEWS
+---------------
+Each KPI is displayed across three time periods:
+
+1. CURRENT MONTH
+   - Shows the metric for the selected current month
+   - Controlled by the "Current Month" setting on Menu tab
+   - Updates automatically when month selection changes
+
+2. YEAR-TO-DATE (YTD)
+   - Aggregates data from the first month through current month
+   - For P&L items: Sum of all months
+   - For Balance Sheet items: Current period balance
+   - For ratios: Calculated using YTD numerator/denominator
+
+3. ALL-TIME / INCEPTION-TO-DATE
+   - Shows metrics since the beginning of available data
+   - Useful for long-term trend analysis
+
+KPI CATEGORIES
+--------------
+
+PROFITABILITY METRICS
+---------------------
+| KPI               | Formula                                    | Target  |
+|-------------------|-------------------------------------------|---------|
+| Revenue           | Total for Income                          | Custom  |
+| Gross Profit      | Gross Profit line from P&L                | Custom  |
+| Gross Margin %    | Gross Profit / Revenue                    | 40%     |
+| Net Income        | Net Income line from P&L                  | Custom  |
+| Net Margin %      | Net Income / Revenue                      | 10%     |
+| EBITDA            | Net Income + Interest + Depreciation      | Custom  |
+| EBITDA Margin %   | EBITDA / Revenue                          | 15%     |
+| Operating Income  | Net Operating Income from P&L             | Custom  |
+| Operating Margin% | Operating Income / Revenue                | 12%     |
+| Revenue Growth %  | (Current - Prior) / Prior                 | 10%     |
+
+LIQUIDITY METRICS
+-----------------
+| KPI               | Formula                                    | Target  |
+|-------------------|-------------------------------------------|---------|
+| Current Ratio     | Current Assets / Current Liabilities      | 1.5     |
+| Quick Ratio       | (Current Assets - Inventory) / CL         | 1.0     |
+| Cash Ratio        | Cash / Current Liabilities                | 0.2     |
+| Working Capital   | Current Assets - Current Liabilities      | Custom  |
+| Cash Balance      | Total Bank Accounts                       | Custom  |
+
+EFFICIENCY METRICS
+------------------
+| KPI               | Formula                                    | Target  |
+|-------------------|-------------------------------------------|---------|
+| AR Days (DSO)     | AR / (Revenue/30)                         | 45 days |
+| AP Days (DPO)     | AP / (COGS/30)                            | 30 days |
+| Asset Turnover    | Revenue / Total Assets                    | 1.0     |
+| Cash Conversion   | AR Days - AP Days                         | 30 days |
+
+LEVERAGE METRICS
+----------------
+| KPI               | Formula                                    | Target  |
+|-------------------|-------------------------------------------|---------|
+| Debt-to-Equity    | Total Liabilities / Total Equity          | 1.0     |
+| Debt-to-Assets    | Total Liabilities / Total Assets          | 50%     |
+| Equity Ratio      | Total Equity / Total Assets               | 50%     |
+| Interest Coverage | Operating Income / Interest Expense       | 3.0x    |
+
+CASH FLOW METRICS
+-----------------
+| KPI               | Formula                                    | Target  |
+|-------------------|-------------------------------------------|---------|
+| Operating CF      | Net Income + Depreciation                 | Custom  |
+| Free Cash Flow    | Operating CF - CapEx                      | Custom  |
+| Cash Burn Rate    | Monthly change in cash balance            | Custom  |
+| Cash Runway       | Cash Balance / Monthly Burn Rate          | 12 mos  |
+
+DASHBOARD CONTROL PAGE
+----------------------
+The Dashboard_Control sheet allows you to customize:
+
+1. TARGET VALUES
+   - Set specific targets for each KPI
+   - User-defined targets for metrics like Revenue, Net Income
+   - Standard industry targets for ratios (adjustable)
+
+2. ALERT THRESHOLDS
+   - Yellow Alert: Triggers at specified % of target (default 80%)
+   - Red Alert: Triggers at specified % of target (default 60%)
+   - For "lower is better" metrics, thresholds work inversely
+
+3. DIRECTION INDICATOR
+   - "Higher" = Green when above target
+   - "Lower" = Green when below target (e.g., AR Days, Debt ratios)
+
+STATUS INDICATORS
+-----------------
+| Symbol | Color  | Meaning                                    |
+|--------|--------|-------------------------------------------|
+| G      | Green  | On or above target                         |
+| Y      | Yellow | Between yellow and target thresholds       |
+| R      | Red    | Below red threshold                        |
+
+TREND INDICATORS
+----------------
+| Symbol | Meaning                                              |
+|--------|-----------------------------------------------------|
+| U      | Improving (up arrow) - current > YTD by 5%+         |
+| D      | Declining (down arrow) - current < YTD by 5%+       |
+| F      | Flat - within 5% of YTD average                     |
+
+VBA AUTOMATION
+--------------
+The following VBA procedures are available:
+
+RefreshDashboard()
+- Refreshes all dashboard calculations
+- Updates named ranges
+- Refreshes charts
+- Call after data upload or month change
+
+UpdateDynamicRanges()
+- Recreates named ranges to include new accounts
+- Called automatically by RefreshDashboard
+
+ExtendFormulasForNewAccounts()
+- Extends SUMIF formulas to include new accounts
+- Recalculates all dashboard formulas
+
+ValidateDashboardData()
+- Checks for missing source data
+- Reports any issues found
+
+FORMULA REFERENCES
+------------------
+All dashboard formulas use these patterns:
+
+P&L Lookups:
+=SUMIF(Source_PL!$A:$A,"Account Name",Source_PL!Column:Column)
+
+Balance Sheet Lookups:
+=SUMIF(Source_BS!$A:$A,"Account Name",Source_BS!Column:Column)
+
+Ratio Calculations:
+=IFERROR(Numerator/Denominator,0)
+
+Days Calculations:
+=IFERROR(Balance/(Flow/MonthCount)*30,0)
+
+PRINT SETTINGS
+--------------
+- Orientation: Landscape
+- Fit to: 1 page wide
+- Margins: 0.5" all sides
+- Headers repeat on each page
+
+MAINTENANCE
+-----------
+1. When adding new accounts:
+   - Run "ExtendFormulasForNewAccounts" macro
+   - Or manually refresh the workbook
+
+2. When changing fiscal year:
+   - Update Menu configuration
+   - Refresh dashboard
+
+3. For custom KPIs:
+   - Add to Dashboard_Control sheet
+   - Create formula in Dashboard sheet
+
+TROUBLESHOOTING
+---------------
+Issue: KPIs showing 0 or #REF!
+- Check that Source_PL and Source_BS have data
+- Verify account names match exactly
+- Run ValidateDashboardData macro
+
+Issue: Charts not updating
+- Run RefreshDashboard macro
+- Check chart data ranges
+
+Issue: Targets not linking
+- Verify Dashboard_Control sheet exists
+- Check named range "KPI_Targets"
+
+================================================================================

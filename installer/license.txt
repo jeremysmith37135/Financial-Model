@@ -1,0 +1,33 @@
+CFO Financial Model Generator
+Copyright (c) 2025 Vectra Finance LLC. All rights reserved.
+
+LICENSE AGREEMENT
+
+This software is licensed, not sold. By installing or using this software,
+you agree to be bound by the terms of this license agreement.
+
+1. GRANT OF LICENSE
+   Vectra Finance LLC grants you a non-exclusive, non-transferable license
+   to use this software for your internal business purposes.
+
+2. RESTRICTIONS
+   You may not:
+   - Redistribute, sublicense, or sell copies of this software
+   - Reverse engineer, decompile, or disassemble this software
+   - Remove or alter any proprietary notices or labels
+
+3. INTELLECTUAL PROPERTY
+   Vectra Finance(TM) is a trademark of Vectra Finance LLC.
+   This software is customized under license for FocusCFO Edition.
+
+4. DISCLAIMER OF WARRANTY
+   THIS SOFTWARE IS PROVIDED "AS IS" WITHOUT WARRANTY OF ANY KIND,
+   EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+   MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT.
+
+5. LIMITATION OF LIABILITY
+   IN NO EVENT SHALL VECTRA FINANCE LLC BE LIABLE FOR ANY DIRECT, INDIRECT,
+   INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES ARISING OUT OF
+   THE USE OR INABILITY TO USE THIS SOFTWARE.
+
+For questions or support, contact: support@vectrafinance.com

@@ -1,0 +1,88 @@
+================================================================================
+CFO DNA FINANCIAL MODEL GENERATOR - VERSIONING STRATEGY
+================================================================================
+Last Updated: December 05, 2025
+
+CURRENT VERSION
+---------------
+Version: 1.1.0
+Build Date: 2025-12-05
+Status: Debug Build
+
+VERSIONING SCHEME
+-----------------
+Format: MAJOR.MINOR.PATCH
+
+- MAJOR: Breaking changes or significant new features
+- MINOR: New features, enhancements (backwards compatible)
+- PATCH: Bug fixes, small improvements
+
+VERSION HISTORY
+---------------
+v1.1.0 (2025-12-05) - Dashboard Module Release
+  - Added Dashboard sheet with CFO-standard KPIs
+  - Added Dashboard_Control sheet for user-defined targets
+  - KPI categories: Profitability, Liquidity, Efficiency, Leverage, Cashflow
+  - Three views: Current Month, YTD, All-Time
+  - Status indicators (G/Y/R) and trend tracking
+  - Version number displayed in window title and UI
+
+v1.0.0 (Initial Release)
+  - Core P&L, Balance Sheet, Cash Flow generation
+  - Source data import from uploaded files
+  - Menu configuration system
+  - Notes and Diagnostics sheets
+
+BUILD STRATEGY
+--------------
+DEVELOPMENT PHASE (Current):
+- Use DEBUG build ONLY during active development
+- Debug build includes console window for error tracking
+- Single debug EXE simplifies testing and troubleshooting
+- File: CFO_DNA_Model_Generator_Debug_v{VERSION}.exe
+
+PRODUCTION PHASE (When 100% Complete):
+- Create non-debug (windowed) build for end users
+- Non-debug build hides console window for cleaner UX
+- File: CFO_DNA_Model_Generator_v{VERSION}.exe
+
+BUILD COMMANDS
+--------------
+Debug Build (with console):
+  pyinstaller --onefile --windowed --add-data "DNA_Template.xlsm;." ^
+    --name "CFO_DNA_Model_Generator_Debug_v{VERSION}" --console desktop_app.py
+
+Production Build (no console):
+  pyinstaller --onefile --windowed --add-data "DNA_Template.xlsm;." ^
+    --name "CFO_DNA_Model_Generator_v{VERSION}" desktop_app.py
+
+IMPORTANT NOTES
+---------------
+1. ALWAYS update APP_VERSION and APP_BUILD_DATE in desktop_app.py before building
+2. Keep Debug and Production builds in sync with the same version number
+3. Test thoroughly with Debug build before creating Production build
+4. Debug console helps identify runtime errors and Excel automation issues
+5. Consider keeping Debug version available for troubleshooting even in production
+
+FILE LOCATIONS
+--------------
+Source Code:    webapp\desktop_app.py
+Template:       webapp\DNA_Template.xlsm
+Debug EXE:      dist\CFO_DNA_Model_Generator_Debug_v{VERSION}.exe
+Prod EXE:       dist\CFO_DNA_Model_Generator_v{VERSION}.exe (when ready)
+
+UPDATING VERSION
+----------------
+1. Edit desktop_app.py:
+   - Change APP_VERSION = "x.x.x"
+   - Change APP_BUILD_DATE = "YYYY-MM-DD"
+
+2. Run PyInstaller command for Debug build
+
+3. Test the new build thoroughly
+
+4. Copy to dist folder
+
+5. Update this document with new version entry
+
+================================================================================

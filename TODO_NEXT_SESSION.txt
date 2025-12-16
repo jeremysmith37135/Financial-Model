@@ -1,0 +1,56 @@
+================================================================================
+CFO DNA FINANCIAL MODEL GENERATOR - NEXT SESSION TODO
+================================================================================
+Created: December 09, 2025
+
+PRIORITY: Create Full Application Documentation
+-----------------------------------------------
+
+1. README.md - Main documentation file
+   - Application overview and purpose
+   - Installation requirements (Python, Excel, dependencies)
+   - Quick start guide
+   - File structure overview
+
+2. User Guide
+   - Step-by-step usage instructions
+   - How to upload P&L and Balance Sheet files
+   - Menu configuration options
+   - Understanding the generated reports
+
+3. Technical Documentation
+   - Code architecture (desktop_app.py structure)
+   - Key functions and their purposes
+   - Excel automation approach (xlwings)
+   - VBA macros included in output
+
+4. Feature Documentation
+   - P&L Report
+     * Dynamic YTD formulas (Menu!E7/F7 helper cells)
+     * SUMPRODUCT formulas for CY YTD / PY YTD
+     * Column grouping by year
+   - Balance Sheet Report
+   - Cash Flow Statement (indirect method)
+   - Dashboard & Dashboard_Control
+   - Menu sheet configuration
+   - Notes sheet
+   - Diagnostics sheet
+
+5. Dependencies List
+   - Python packages (xlwings, pandas, tkinter, etc.)
+   - Excel requirements (macros enabled)
+   - Windows-specific considerations
+
+CURRENT STATE NOTES
+-------------------
+- Latest EXE: dist\CFO_Financial_Model_Generator_Debug.exe
+- Main code: webapp\desktop_app.py
+- Template: webapp\DNA_Template.xlsm
+
+Recent Changes (Dec 9, 2025):
+- Fixed YTD helper formulas: E7=MONTH(C7), F7=YEAR(C7)
+- Added "Jan-Nov" date range label above YTD columns
+- Cashflow columns now AutoFit
+- YYYYMM helper values hidden with white font (not row hiding)
+
+================================================================================

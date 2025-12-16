@@ -1,0 +1,38 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python:*)",
+      "Bash(pip show:*)",
+      "Bash(timeout:*)",
+      "Bash(curl:*)",
+      "Bash(unzip:*)",
+      "Bash(pip install:*)",
+      "Bash(dir \"C:\\Users\\jerju\\OneDrive\\Focus CFO\\AI\\DNA Model\\AMP_Quality_Energy_DNA_Model.xlsm\")",
+      "Bash(pyinstaller:*)",
+      "Bash(tasklist:*)",
+      "Bash(findstr:*)",
+      "Bash(dir \"C:\\Users\\jerju\\OneDrive\\Focus CFO\\AI\\DNA Model\\dist\\CFO_DNA_Model_Generator.exe\")",
+      "Bash(copy desktop_app.py desktop_app_backup.py)",
+      "Bash(powershell -c \"(Get-Content ''C:\\Users\\jerju\\OneDrive\\Focus CFO\\AI\\DNA Model\\webapp\\desktop_app.py'').Count\")",
+      "Bash(dir \"C:\\Users\\jerju\\OneDrive\\Focus CFO\\AI\\DNA Model\\dist\" /b)",
+      "Bash(copy:*)",
+      "Bash(powershell -Command:*)",
+      "Bash(dir \"C:\\Users\\jerju\\OneDrive\\Focus CFO\\AI\\DNA Model\\dist\\*.exe\")",
+      "Bash(dir \"C:\\Users\\jerju\\OneDrive\\Focus CFO\\AI\\DNA Model\\webapp\\*Template*.xlsm\")",
+      "Bash(dir:*)",
+      "Bash(copy \"C:\\Users\\jerju\\OneDrive\\Focus CFO\\AI\\DNA Model\\webapp\\dist\\CFO_Financial_Model_Generator_Debug_v1.2.2.exe\" \"C:\\Users\\jerju\\OneDrive\\Focus CFO\\AI\\DNA Model\\dist\"\")",
+      "Bash(xcopy:*)",
+      "Bash(dir \"C:\\Users\\jerju\\OneDrive\\Focus CFO\" /s /b)",
+      "WebFetch(domain:www.focuscfo.com)",
+      "WebSearch",
+      "Bash(cmd /c copy \"C:\\Users\\jerju\\OneDrive\\Focus CFO\\AI\\DNA Model\\webapp\\dist\\CFO_Financial_Model_Generator_Debug_v1.3.0.exe\" \"C:\\Users\\jerju\\OneDrive\\Focus CFO\\AI\\DNA Model\\dist\"\")",
+      "Bash(python -m py_compile:*)",
+      "Bash(dir \"C:\\Users\\jerju\\OneDrive\\Focus CFO\\AI\\DNA Model\\webapp\\dist\\*.exe\")",
+      "Bash(git init:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
