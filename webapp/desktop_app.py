@@ -1301,10 +1301,22 @@ End Function
 
     def _generate_model(self):
         """Generate or update the financial model based on mode"""
-        # Validate common inputs
-        if not self.pl_path.get() or not self.bs_path.get():
-            messagebox.showerror("Error", "Please select both P&L and Balance Sheet files")
-            return
+        # Validate inputs based on division mode
+        if self.is_multi_division.get():
+            # Multi-division mode: validate divisions are configured
+            if not self.divisions or len(self.divisions) == 0:
+                messagebox.showerror("Error", "Please configure divisions first using 'Configure Divisions...'")
+                return
+            # Validate each division has files
+            for div in self.divisions:
+                if not div.get('pl_path') or not div.get('bs_path'):
+                    messagebox.showerror("Error", f"Division '{div.get('name', 'Unknown')}' is missing P&L or Balance Sheet file")
+                    return
+        else:
+            # Single entity mode: validate single files
+            if not self.pl_path.get() or not self.bs_path.get():
+                messagebox.showerror("Error", "Please select both P&L and Balance Sheet files")
+                return
 
         if self.mode.get() == "new":
             # New model mode
@@ -2192,12 +2204,450 @@ End Function
             import traceback
             traceback.print_exc()
 
+    def _create_multi_division_model(self, save_path, user_start, user_end):
+        """Create a multi-division Excel model with consolidated reporting"""
+        total_steps = 18
+        current_step = 0
+
+        def update_step(msg):
+            nonlocal current_step
+            current_step += 1
+            self._update_status(f"Step {current_step}/{total_steps}: {msg}")
+
+        # Step 1-3: Parse all division files
+        all_pl_accounts = []  # Stacked accounts with division
+        all_bs_accounts = []
+        all_months = None
+        pl_totals = {}
+        bs_totals = {}
+        division_configs = []
+
+        for i, div in enumerate(self.divisions):
+            div_name = div['name']
+            update_step(f"Reading {div_name} P&L file...")
+
+            # Parse P&L
+            pl_data = pd.read_excel(div['pl_path'], header=None)
+            pl_indents = self._get_cell_indents(div['pl_path'])
+            div_pl_accounts, div_months, div_pl_totals = self._parse_financial_data(
+                pl_data, pl_indents, user_start, user_end
+            )
+
+            # Parse BS
+            bs_data = pd.read_excel(div['bs_path'], header=None)
+            bs_indents = self._get_cell_indents(div['bs_path'])
+            div_bs_accounts, _, div_bs_totals = self._parse_financial_data(
+                bs_data, bs_indents, user_start, user_end
+            )
+
+            # Add division identifier to each account
+            for acct in div_pl_accounts:
+                acct['division'] = div_name
+            for acct in div_bs_accounts:
+                acct['division'] = div_name
+
+            all_pl_accounts.extend(div_pl_accounts)
+            all_bs_accounts.extend(div_bs_accounts)
+
+            # Use first division's months as reference (or merge if different)
+            if all_months is None:
+                all_months = div_months
+            else:
+                # Merge months from different divisions
+                existing_keys = set((m, y) for m, y, _ in all_months)
+                for m, y, name in div_months:
+                    if (m, y) not in existing_keys:
+                        all_months.append((m, y, name))
+                all_months = sorted(all_months, key=lambda x: (x[1], x[0]))
+
+            # Merge totals
+            pl_totals.update(div_pl_totals)
+            bs_totals.update(div_bs_totals)
+
+            # Create DivisionConfig for consolidation engine
+            division_configs.append(DivisionConfig(
+                name=div_name,
+                is_primary=div.get('is_primary', False),
+                pl_file_path=div['pl_path'],
+                bs_file_path=div['bs_path'],
+                pl_accounts=div_pl_accounts,
+                bs_accounts=div_bs_accounts
+            ))
+
+        print(f"Parsed {len(self.divisions)} divisions:")
+        for div in self.divisions:
+            print(f"  - {div['name']}")
+        print(f"Total: {len(all_pl_accounts)} P&L accounts, {len(all_bs_accounts)} BS accounts, {len(all_months)} months")
+
+        # Step 4: Run consolidation engine for account matching
+        update_step("Running consolidation engine...")
+        engine = ConsolidationEngine(division_configs)
+
+        # Match P&L accounts
+        pl_mappings = engine.match_accounts(statement_type="pl")
+        print(f"P&L mappings: {len(pl_mappings)} consolidated accounts")
+
+        # Match BS accounts
+        bs_mappings = engine.match_accounts(statement_type="bs")
+        print(f"BS mappings: {len(bs_mappings)} consolidated accounts")
+
+        # Store mappings
+        self.account_mappings = {'pl': pl_mappings, 'bs': bs_mappings}
+
+        # Step 5: Show mapping review dialog for intelligent matches
+        unapproved = [m for m in pl_mappings.values() if not m.approved]
+        unapproved.extend([m for m in bs_mappings.values() if not m.approved])
+
+        if unapproved:
+            update_step("Reviewing account mappings...")
+            # Show review dialog (this will block until user approves)
+            self.root.update()
+            AccountMappingDialog(
+                self.root,
+                {**pl_mappings, **bs_mappings},
+                self.divisions,
+                self._handle_mapping_approval
+            )
+            self.root.wait_window()  # Wait for dialog to close
+
+        # Create consolidated account lists
+        update_step("Creating consolidated accounts...")
+        consolidated_pl = engine.consolidate_values(pl_mappings, all_months, "pl")
+        consolidated_bs = engine.consolidate_values(bs_mappings, all_months, "bs")
+
+        # Now create the Excel workbook
+        use_template = os.path.exists(TEMPLATE_PATH)
+        temp_dir = tempfile.mkdtemp()
+        temp_path = os.path.join(temp_dir, 'temp_model.xlsm')
+
+        update_step("Starting Excel...")
+        app = xw.App(visible=False)
+        app.display_alerts = False
+        app.screen_updating = False
+        wb = None
+
+        try:
+            if use_template:
+                shutil.copy(TEMPLATE_PATH, temp_path)
+                wb = app.books.open(temp_path)
+                menu_sheet = wb.sheets['Menu']
+                source_pl = wb.sheets['Source_PL']
+                source_bs = wb.sheets['Source_BS']
+            else:
+                wb = app.books.add()
+                menu_sheet = wb.sheets[0]
+                menu_sheet.name = 'Menu'
+                source_pl = wb.sheets.add('Source_PL', after=menu_sheet)
+                source_bs = wb.sheets.add('Source_BS', after=source_pl)
+
+            # Clear existing data
+            source_pl.range('A1:ZZ1000').clear()
+            source_bs.range('A1:ZZ1000').clear()
+
+            # Populate source sheets with stacked division data
+            update_step("Populating source data with divisions...")
+            self._populate_source_sheet(source_pl, all_pl_accounts, all_months)
+            self._populate_source_sheet(source_bs, all_bs_accounts, all_months)
+
+            # Create or get report sheets
+            update_step("Creating consolidated P&L...")
+            if 'Consolidated_PL' in [s.name for s in wb.sheets]:
+                cons_pl_sheet = wb.sheets['Consolidated_PL']
+                cons_pl_sheet.range('A1:ZZ1000').clear()
+            else:
+                # Try to use existing PL sheet or create new
+                if 'PL' in [s.name for s in wb.sheets]:
+                    cons_pl_sheet = wb.sheets['PL']
+                    cons_pl_sheet.name = 'Consolidated_PL'
+                    cons_pl_sheet.range('A1:ZZ1000').clear()
+                else:
+                    cons_pl_sheet = wb.sheets.add('Consolidated_PL', after=source_bs)
+
+            # Create consolidated P&L report using consolidated accounts
+            self._create_consolidated_pl_report(cons_pl_sheet, consolidated_pl, all_months, pl_totals)
+
+            update_step("Creating consolidated Balance Sheet...")
+            if 'Consolidated_BS' in [s.name for s in wb.sheets]:
+                cons_bs_sheet = wb.sheets['Consolidated_BS']
+                cons_bs_sheet.range('A1:ZZ1000').clear()
+            else:
+                if 'Balance_Sheet' in [s.name for s in wb.sheets]:
+                    cons_bs_sheet = wb.sheets['Balance_Sheet']
+                    cons_bs_sheet.name = 'Consolidated_BS'
+                    cons_bs_sheet.range('A1:ZZ1000').clear()
+                else:
+                    cons_bs_sheet = wb.sheets.add('Consolidated_BS', after=cons_pl_sheet)
+
+            self._create_consolidated_bs_report(cons_bs_sheet, consolidated_bs, all_months, bs_totals)
+
+            update_step("Creating consolidated Cash Flow...")
+            if 'Consolidated_CF' in [s.name for s in wb.sheets]:
+                cons_cf_sheet = wb.sheets['Consolidated_CF']
+                cons_cf_sheet.range('A1:ZZ1000').clear()
+            else:
+                if 'Cash_Flow' in [s.name for s in wb.sheets]:
+                    cons_cf_sheet = wb.sheets['Cash_Flow']
+                    cons_cf_sheet.name = 'Consolidated_CF'
+                    cons_cf_sheet.range('A1:ZZ1000').clear()
+                else:
+                    cons_cf_sheet = wb.sheets.add('Consolidated_CF', after=cons_bs_sheet)
+
+            self._create_cash_flow(cons_cf_sheet, all_months)
+
+            # Create division-specific sheets
+            for div in self.divisions:
+                div_name = div['name']
+                safe_name = div_name.replace(' ', '_')[:20]  # Excel sheet name limit
+
+                update_step(f"Creating {div_name} sheets...")
+
+                # Get division-specific accounts
+                div_pl = [a for a in all_pl_accounts if a.get('division') == div_name]
+                div_bs = [a for a in all_bs_accounts if a.get('division') == div_name]
+
+                # Create division P&L sheet
+                div_pl_name = f"{safe_name}_PL"
+                if div_pl_name in [s.name for s in wb.sheets]:
+                    div_pl_sheet = wb.sheets[div_pl_name]
+                    div_pl_sheet.range('A1:ZZ1000').clear()
+                else:
+                    div_pl_sheet = wb.sheets.add(div_pl_name, after=cons_cf_sheet)
+                self._create_division_pl_report(div_pl_sheet, div_pl, all_months, pl_totals, div_name)
+
+                # Create division BS sheet
+                div_bs_name = f"{safe_name}_BS"
+                if div_bs_name in [s.name for s in wb.sheets]:
+                    div_bs_sheet = wb.sheets[div_bs_name]
+                    div_bs_sheet.range('A1:ZZ1000').clear()
+                else:
+                    div_bs_sheet = wb.sheets.add(div_bs_name, after=div_pl_sheet)
+                self._create_division_bs_report(div_bs_sheet, div_bs, all_months, bs_totals, div_name)
+
+            # Update Menu sheet with division navigation
+            update_step("Creating Menu with navigation...")
+            self._create_multi_division_menu_sheet(menu_sheet, all_months, self.divisions)
+
+            # Create Dashboard
+            update_step("Creating Dashboard...")
+            if 'Dashboard' in [s.name for s in wb.sheets]:
+                dashboard_sheet = wb.sheets['Dashboard']
+                dashboard_sheet.range('A1:ZZ1000').clear()
+            else:
+                dashboard_sheet = wb.sheets.add('Dashboard', before=menu_sheet)
+            self._create_dashboard_sheet(dashboard_sheet, consolidated_pl, consolidated_bs, all_months, pl_totals)
+
+            # Create Mapping_Config sheet for persistence
+            update_step("Saving account mappings...")
+            MappingPersistence.save_to_excel(wb, self.account_mappings, self.divisions)
+
+            # Save mappings to JSON file alongside Excel
+            json_path = MappingPersistence.get_json_filepath(save_path)
+            MappingPersistence.save_to_json(
+                self.account_mappings,
+                self.divisions,
+                self.company_name.get(),
+                json_path
+            )
+
+            # Add VBA code
+            update_step("Adding VBA macros...")
+            try:
+                module_exists = False
+                for component in wb.api.VBProject.VBComponents:
+                    if component.Name == "FinancialModel":
+                        component.CodeModule.DeleteLines(1, component.CodeModule.CountOfLines)
+                        component.CodeModule.AddFromString(self.VBA_CODE)
+                        module_exists = True
+                        break
+                if not module_exists:
+                    vba_module = wb.api.VBProject.VBComponents.Add(1)
+                    vba_module.Name = "FinancialModel"
+                    vba_module.CodeModule.AddFromString(self.VBA_CODE)
+            except:
+                pass
+
+            # Activate Dashboard
+            try:
+                dashboard_sheet.activate()
+            except:
+                pass
+
+            # Save workbook
+            update_step("Saving workbook...")
+            wb.save()
+            wb.close()
+            wb = None
+
+        finally:
+            try:
+                if wb is not None:
+                    wb.close()
+            except:
+                pass
+            try:
+                app.quit()
+            except:
+                pass
+
+        # Move from temp to final location
+        try:
+            if os.path.exists(save_path):
+                os.remove(save_path)
+            shutil.move(temp_path, save_path)
+        finally:
+            try:
+                shutil.rmtree(temp_dir)
+            except:
+                pass
+
+    def _create_consolidated_pl_report(self, sheet, accounts, months, detected_totals=None):
+        """Create consolidated P&L report - wrapper that uses existing _create_pl_report"""
+        # For now, use the existing P&L report method with consolidated accounts
+        # The accounts already have summed values from consolidate_values()
+        self._create_pl_report(sheet, accounts, months, detected_totals)
+
+    def _create_consolidated_bs_report(self, sheet, accounts, months, detected_totals=None):
+        """Create consolidated Balance Sheet report"""
+        self._create_bs_report(sheet, accounts, months, detected_totals)
+
+    def _create_division_pl_report(self, sheet, accounts, months, detected_totals, division_name):
+        """Create P&L report for a specific division"""
+        # Use existing P&L report method with division-filtered accounts
+        self._create_pl_report(sheet, accounts, months, detected_totals)
+        # Update title to show division name
+        sheet.range('A1').value = f"{division_name}"
+
+    def _create_division_bs_report(self, sheet, accounts, months, detected_totals, division_name):
+        """Create Balance Sheet report for a specific division"""
+        self._create_bs_report(sheet, accounts, months, detected_totals)
+        sheet.range('A1').value = f"{division_name}"
+
+    def _create_multi_division_menu_sheet(self, sheet, months, divisions):
+        """Create menu sheet with multi-division navigation"""
+        # Start with base menu content
+        DARK_BLUE = (22, 33, 62)
+        GRAY = (128, 128, 128)
+
+        content = [
+            ['', '', ''],  # Row 1
+            ['', self.company_name.get(), ''],  # Row 2
+            ['', 'Consolidated Financial Model', ''],  # Row 3
+            ['', '', ''],  # Row 4
+            ['', 'CONFIGURATION', ''],  # Row 5
+            ['', 'Company:', self.company_name.get()],  # Row 6
+            ['', 'Current Month:', months[-1][2] if months else ''],  # Row 7
+            ['', 'Data Range:', f"{months[0][2]} to {months[-1][2]}" if months else ''],  # Row 8
+            ['', 'Divisions:', str(len(divisions))],  # Row 9
+            ['', '', ''],  # Row 10
+            ['', 'NAVIGATION', ''],  # Row 11
+            ['', '', ''],  # Row 12
+            ['', 'CONSOLIDATED', ''],  # Row 13
+            ['', '  Consolidated P&L', ''],  # Row 14
+            ['', '  Consolidated Balance Sheet', ''],  # Row 15
+            ['', '  Consolidated Cash Flow', ''],  # Row 16
+            ['', '  Dashboard', ''],  # Row 17
+            ['', '', ''],  # Row 18
+        ]
+
+        # Add division navigation
+        row = 19
+        for div in divisions:
+            safe_name = div['name'].replace(' ', '_')[:20]
+            content.append(['', f"DIVISION: {div['name']}", ''])
+            content.append(['', f"  {safe_name}_PL", ''])
+            content.append(['', f"  {safe_name}_BS", ''])
+            content.append(['', '', ''])
+            row += 4
+
+        sheet.range('A1').value = content
+
+        # Format title
+        try:
+            sheet.range('B2').font.name = 'Calibri Light'
+            sheet.range('B2').font.size = 28
+            sheet.range('B2').font.bold = True
+            sheet.range('B2').font.color = DARK_BLUE
+
+            sheet.range('B3').font.name = 'Calibri Light'
+            sheet.range('B3').font.size = 14
+            sheet.range('B3').font.color = GRAY
+
+            # Navigation headers
+            for r in [11, 13]:
+                sheet.range(f'B{r}').font.bold = True
+                sheet.range(f'B{r}').font.color = DARK_BLUE
+
+            # Division headers
+            for i, div in enumerate(divisions):
+                header_row = 19 + (i * 4)
+                sheet.range(f'B{header_row}').font.bold = True
+                sheet.range(f'B{header_row}').font.color = DARK_BLUE
+        except:
+            pass
+
+        # Add hyperlinks to sheets
+        try:
+            sheet.range('B14').api.Hyperlinks.Add(
+                Anchor=sheet.range('B14').api,
+                Address="",
+                SubAddress="Consolidated_PL!A1",
+                TextToDisplay="  Consolidated P&L"
+            )
+            sheet.range('B15').api.Hyperlinks.Add(
+                Anchor=sheet.range('B15').api,
+                Address="",
+                SubAddress="Consolidated_BS!A1",
+                TextToDisplay="  Consolidated Balance Sheet"
+            )
+            sheet.range('B16').api.Hyperlinks.Add(
+                Anchor=sheet.range('B16').api,
+                Address="",
+                SubAddress="Consolidated_CF!A1",
+                TextToDisplay="  Consolidated Cash Flow"
+            )
+            sheet.range('B17').api.Hyperlinks.Add(
+                Anchor=sheet.range('B17').api,
+                Address="",
+                SubAddress="Dashboard!A1",
+                TextToDisplay="  Dashboard"
+            )
+
+            # Division hyperlinks
+            for i, div in enumerate(divisions):
+                safe_name = div['name'].replace(' ', '_')[:20]
+                pl_row = 20 + (i * 4)
+                bs_row = 21 + (i * 4)
+
+                sheet.range(f'B{pl_row}').api.Hyperlinks.Add(
+                    Anchor=sheet.range(f'B{pl_row}').api,
+                    Address="",
+                    SubAddress=f"{safe_name}_PL!A1",
+                    TextToDisplay=f"  {safe_name}_PL"
+                )
+                sheet.range(f'B{bs_row}').api.Hyperlinks.Add(
+                    Anchor=sheet.range(f'B{bs_row}').api,
+                    Address="",
+                    SubAddress=f"{safe_name}_BS!A1",
+                    TextToDisplay=f"  {safe_name}_BS"
+                )
+        except:
+            pass
+
+        # Set column widths
+        sheet.range('A:A').column_width = 5
+        sheet.range('B:B').column_width = 40
+        sheet.range('C:C').column_width = 30
+
     def _create_excel_model(self, save_path):
         """Create the Excel model using xlwings"""
         # Get user-specified date range
         user_start, user_end = self._get_user_date_params()
 
-        # Parse input files with indentation detection
+        # Check if multi-division mode
+        if self.is_multi_division.get() and self.divisions:
+            return self._create_multi_division_model(save_path, user_start, user_end)
+
+        # Single entity mode - Parse input files with indentation detection
         self._update_status("Step 1/12: Reading P&L file...")
         pl_data = pd.read_excel(self.pl_path.get(), header=None)
         pl_indents = self._get_cell_indents(self.pl_path.get())
