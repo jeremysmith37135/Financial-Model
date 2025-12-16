@@ -8,6 +8,12 @@ VERSION HISTORY:
 - v1.2.0 (2025-12-09): Renamed from DNA Model to Financial Model
 - v1.2.2 (2025-12-10): Fixed Dashboard YTD calculations to use current year only
                         (Jan through current month from Menu!C7)
+- v2.0.0 (2025-12-16): Added multi-division support with consolidation
+                        - Division setup wizard for multiple entities
+                        - Intelligent account matching via ChatGPT API
+                        - Consolidated P&L, Balance Sheet, Cash Flow
+                        - Division-specific and consolidated views
+                        - Account mapping persistence (JSON + Excel)
 """
 
 import os
@@ -18,13 +24,18 @@ from tkinter import ttk, filedialog, messagebox
 from datetime import datetime
 import tempfile
 import shutil
+import json
 import pandas as pd
 import xlwings as xw
 from xlwings.constants import DeleteShiftDirection
 
+# Multi-division support imports
+from consolidation_engine import ConsolidationEngine, DivisionConfig, AccountMapping
+from mapping_persistence import MappingPersistence
+
 # Application Version
-APP_VERSION = "1.3.0"
-APP_BUILD_DATE = "2025-12-10"
+APP_VERSION = "2.0.0"
+APP_BUILD_DATE = "2025-12-16"
 APP_NAME = "CFO Financial Model Generator"
 
 # Get the directory where the script/exe is located
@@ -47,6 +58,340 @@ if not os.path.exists(TEMPLATE_PATH):
     TEMPLATE_PATH = os.path.join(APP_DIR, 'DNA_Template.xlsm')
 if not os.path.exists(TEMPLATE_PATH):
     TEMPLATE_PATH = os.path.join(EXE_DIR, 'DNA_Template.xlsm')
+
+
+class DivisionSetupDialog(tk.Toplevel):
+    """Dialog for configuring multiple divisions"""
+
+    def __init__(self, parent, callback, existing_divisions=None):
+        super().__init__(parent)
+        self.title("Multi-Division Setup")
+        self.callback = callback
+        self.divisions = []  # List of division entries
+        self.division_widgets = []  # UI widgets for each division
+
+        # Initialize with existing divisions or empty
+        if existing_divisions:
+            for div in existing_divisions:
+                self.divisions.append({
+                    'name': tk.StringVar(value=div.get('name', '')),
+                    'is_primary': tk.BooleanVar(value=div.get('is_primary', False)),
+                    'pl_path': tk.StringVar(value=div.get('pl_path', '')),
+                    'bs_path': tk.StringVar(value=div.get('bs_path', ''))
+                })
+
+        self.resizable(False, False)
+        self._create_ui()
+        self._center_window(700, 500)
+
+        # Make modal
+        self.transient(parent)
+        self.grab_set()
+
+    def _center_window(self, width, height):
+        self.update_idletasks()
+        screen_width = self.winfo_screenwidth()
+        screen_height = self.winfo_screenheight()
+        x = (screen_width - width) // 2
+        y = (screen_height - height) // 2
+        self.geometry(f"{width}x{height}+{x}+{y}")
+
+    def _create_ui(self):
+        main_frame = ttk.Frame(self, padding="15")
+        main_frame.pack(fill=tk.BOTH, expand=True)
+
+        # Title
+        ttk.Label(main_frame, text="Configure Divisions",
+                  font=('Segoe UI', 14, 'bold')).pack(pady=(0, 10))
+
+        ttk.Label(main_frame, text="Add divisions/departments/branches for consolidated reporting.",
+                  font=('Segoe UI', 9), foreground='gray').pack(pady=(0, 15))
+
+        # Division list frame with scrollbar
+        list_frame = ttk.Frame(main_frame)
+        list_frame.pack(fill=tk.BOTH, expand=True)
+
+        # Canvas for scrollable content
+        self.canvas = tk.Canvas(list_frame, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(list_frame, orient="vertical", command=self.canvas.yview)
+        self.scrollable_frame = ttk.Frame(self.canvas)
+
+        self.scrollable_frame.bind(
+            "<Configure>",
+            lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        )
+
+        self.canvas.create_window((0, 0), window=self.scrollable_frame, anchor="nw")
+        self.canvas.configure(yscrollcommand=scrollbar.set)
+
+        self.canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        # Add initial division if none exist
+        if not self.divisions:
+            self._add_division(is_first=True)
+
+        # Render existing divisions
+        for i, div in enumerate(self.divisions):
+            self._render_division(i, is_first=(i == 0))
+
+        # Buttons frame
+        btn_frame = ttk.Frame(main_frame)
+        btn_frame.pack(fill=tk.X, pady=(15, 0))
+
+        ttk.Button(btn_frame, text="+ Add Division", command=self._add_division).pack(side=tk.LEFT)
+
+        ttk.Button(btn_frame, text="Cancel", command=self.destroy).pack(side=tk.RIGHT, padx=(5, 0))
+        ttk.Button(btn_frame, text="Save & Continue", command=self._save_and_close).pack(side=tk.RIGHT)
+
+    def _add_division(self, is_first=False):
+        """Add a new division entry"""
+        div = {
+            'name': tk.StringVar(value=f"Division {len(self.divisions) + 1}"),
+            'is_primary': tk.BooleanVar(value=is_first),
+            'pl_path': tk.StringVar(),
+            'bs_path': tk.StringVar()
+        }
+        self.divisions.append(div)
+        self._render_division(len(self.divisions) - 1, is_first)
+
+    def _render_division(self, index, is_first=False):
+        """Render UI widgets for a division entry"""
+        div = self.divisions[index]
+
+        frame = ttk.LabelFrame(self.scrollable_frame, text=f"Division {index + 1}", padding="10")
+        frame.pack(fill=tk.X, pady=5, padx=5)
+
+        # Row 1: Name and Primary checkbox
+        row1 = ttk.Frame(frame)
+        row1.pack(fill=tk.X, pady=(0, 5))
+
+        ttk.Label(row1, text="Name:").pack(side=tk.LEFT)
+        ttk.Entry(row1, textvariable=div['name'], width=25).pack(side=tk.LEFT, padx=5)
+
+        ttk.Checkbutton(row1, text="Primary Division",
+                        variable=div['is_primary'],
+                        command=lambda i=index: self._set_primary(i)).pack(side=tk.LEFT, padx=20)
+
+        if not is_first:
+            ttk.Button(row1, text="Remove", width=8,
+                       command=lambda i=index: self._remove_division(i)).pack(side=tk.RIGHT)
+
+        # Row 2: P&L file
+        row2 = ttk.Frame(frame)
+        row2.pack(fill=tk.X, pady=(0, 5))
+
+        ttk.Label(row2, text="P&L File:").pack(side=tk.LEFT)
+        ttk.Entry(row2, textvariable=div['pl_path'], width=40).pack(side=tk.LEFT, padx=5)
+        ttk.Button(row2, text="Browse...",
+                   command=lambda v=div['pl_path']: self._browse_file(v, "P&L")).pack(side=tk.LEFT)
+
+        # Row 3: BS file
+        row3 = ttk.Frame(frame)
+        row3.pack(fill=tk.X)
+
+        ttk.Label(row3, text="Balance Sheet:").pack(side=tk.LEFT)
+        ttk.Entry(row3, textvariable=div['bs_path'], width=40).pack(side=tk.LEFT, padx=5)
+        ttk.Button(row3, text="Browse...",
+                   command=lambda v=div['bs_path']: self._browse_file(v, "Balance Sheet")).pack(side=tk.LEFT)
+
+        self.division_widgets.append(frame)
+
+    def _set_primary(self, selected_index):
+        """Ensure only one division is marked as primary"""
+        for i, div in enumerate(self.divisions):
+            if i != selected_index:
+                div['is_primary'].set(False)
+
+    def _remove_division(self, index):
+        """Remove a division entry"""
+        if len(self.divisions) <= 1:
+            messagebox.showwarning("Warning", "At least one division is required.")
+            return
+
+        # Remove from list
+        self.divisions.pop(index)
+
+        # Rebuild UI
+        for widget in self.division_widgets:
+            widget.destroy()
+        self.division_widgets.clear()
+
+        for i, div in enumerate(self.divisions):
+            self._render_division(i, is_first=(i == 0))
+
+        # Ensure at least one is primary
+        if not any(d['is_primary'].get() for d in self.divisions):
+            self.divisions[0]['is_primary'].set(True)
+
+    def _browse_file(self, var, file_type):
+        """Browse for a file"""
+        path = filedialog.askopenfilename(
+            title=f"Select {file_type} File",
+            filetypes=[("Excel files", "*.xlsx *.xls"), ("CSV files", "*.csv")]
+        )
+        if path:
+            var.set(path)
+
+    def _save_and_close(self):
+        """Validate and save divisions"""
+        # Validate
+        for i, div in enumerate(self.divisions):
+            if not div['name'].get().strip():
+                messagebox.showerror("Error", f"Division {i + 1} needs a name.")
+                return
+            if not div['pl_path'].get():
+                messagebox.showerror("Error", f"Division '{div['name'].get()}' needs a P&L file.")
+                return
+            if not div['bs_path'].get():
+                messagebox.showerror("Error", f"Division '{div['name'].get()}' needs a Balance Sheet file.")
+                return
+
+        # Ensure one is primary
+        if not any(d['is_primary'].get() for d in self.divisions):
+            self.divisions[0]['is_primary'].set(True)
+
+        # Convert to list of dicts
+        result = []
+        for div in self.divisions:
+            result.append({
+                'name': div['name'].get().strip(),
+                'is_primary': div['is_primary'].get(),
+                'pl_path': div['pl_path'].get(),
+                'bs_path': div['bs_path'].get()
+            })
+
+        self.callback(result)
+        self.destroy()
+
+
+class AccountMappingDialog(tk.Toplevel):
+    """Dialog for reviewing and approving account mappings"""
+
+    def __init__(self, parent, mappings, divisions, callback):
+        super().__init__(parent)
+        self.title("Review Account Mappings")
+        self.mappings = mappings  # Dict of consolidated_name -> AccountMapping
+        self.divisions = divisions
+        self.callback = callback
+        self.approved_mappings = {}
+
+        self.resizable(True, True)
+        self._create_ui()
+        self._center_window(900, 600)
+
+        # Make modal
+        self.transient(parent)
+        self.grab_set()
+
+    def _center_window(self, width, height):
+        self.update_idletasks()
+        screen_width = self.winfo_screenwidth()
+        screen_height = self.winfo_screenheight()
+        x = (screen_width - width) // 2
+        y = (screen_height - height) // 2
+        self.geometry(f"{width}x{height}+{x}+{y}")
+
+    def _create_ui(self):
+        main_frame = ttk.Frame(self, padding="15")
+        main_frame.pack(fill=tk.BOTH, expand=True)
+
+        # Title
+        ttk.Label(main_frame, text="Review Account Mappings",
+                  font=('Segoe UI', 14, 'bold')).pack(pady=(0, 5))
+
+        ttk.Label(main_frame, text="Review how accounts from different divisions will be consolidated.",
+                  font=('Segoe UI', 9), foreground='gray').pack(pady=(0, 15))
+
+        # Legend
+        legend_frame = ttk.Frame(main_frame)
+        legend_frame.pack(fill=tk.X, pady=(0, 10))
+
+        ttk.Label(legend_frame, text="Match Types:", font=('Segoe UI', 9, 'bold')).pack(side=tk.LEFT)
+        ttk.Label(legend_frame, text="  Exact = identical names", foreground='green').pack(side=tk.LEFT)
+        ttk.Label(legend_frame, text="  | Intelligent = AI-suggested", foreground='blue').pack(side=tk.LEFT)
+        ttk.Label(legend_frame, text="  | Unmatched = unique to one division", foreground='orange').pack(side=tk.LEFT)
+
+        # Treeview for mappings
+        columns = ['Consolidated', 'Match Type', 'Confidence'] + [d['name'] for d in self.divisions]
+        self.tree = ttk.Treeview(main_frame, columns=columns, show='headings', height=15)
+
+        for col in columns:
+            self.tree.heading(col, text=col)
+            width = 150 if col == 'Consolidated' else 100
+            self.tree.column(col, width=width)
+
+        # Scrollbars
+        vsb = ttk.Scrollbar(main_frame, orient="vertical", command=self.tree.yview)
+        hsb = ttk.Scrollbar(main_frame, orient="horizontal", command=self.tree.xview)
+        self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+
+        self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # Populate tree
+        self._populate_tree()
+
+        # Buttons frame
+        btn_frame = ttk.Frame(main_frame)
+        btn_frame.pack(fill=tk.X, pady=(15, 0))
+
+        ttk.Button(btn_frame, text="Approve All & Continue",
+                   command=self._approve_all).pack(side=tk.RIGHT, padx=(5, 0))
+        ttk.Button(btn_frame, text="Cancel", command=self.destroy).pack(side=tk.RIGHT)
+
+    def _populate_tree(self):
+        """Populate treeview with mappings"""
+        # Group by match type
+        by_type = {'exact': [], 'intelligent': [], 'manual': [], 'unmatched': []}
+
+        for name, mapping in self.mappings.items():
+            match_type = mapping.match_type if hasattr(mapping, 'match_type') else mapping.get('match_type', 'unknown')
+            if match_type in by_type:
+                by_type[match_type].append((name, mapping))
+            else:
+                by_type['unmatched'].append((name, mapping))
+
+        # Add to tree
+        for match_type in ['exact', 'intelligent', 'manual', 'unmatched']:
+            for name, mapping in by_type[match_type]:
+                if hasattr(mapping, 'division_mappings'):
+                    div_mappings = mapping.division_mappings
+                    confidence = mapping.confidence
+                    m_type = mapping.match_type
+                else:
+                    div_mappings = mapping.get('division_mappings', {})
+                    confidence = mapping.get('confidence', 1.0)
+                    m_type = mapping.get('match_type', 'unknown')
+
+                values = [name, m_type, f"{confidence:.0%}"]
+                for div in self.divisions:
+                    values.append(div_mappings.get(div['name'], ''))
+
+                item = self.tree.insert('', tk.END, values=values)
+
+                # Color code by match type
+                if m_type == 'exact':
+                    self.tree.tag_configure('exact', foreground='green')
+                    self.tree.item(item, tags=('exact',))
+                elif m_type == 'intelligent':
+                    self.tree.tag_configure('intelligent', foreground='blue')
+                    self.tree.item(item, tags=('intelligent',))
+                elif m_type == 'unmatched':
+                    self.tree.tag_configure('unmatched', foreground='orange')
+                    self.tree.item(item, tags=('unmatched',))
+
+    def _approve_all(self):
+        """Approve all mappings and close"""
+        # Mark all as approved
+        for name, mapping in self.mappings.items():
+            if hasattr(mapping, 'approved'):
+                mapping.approved = True
+            elif isinstance(mapping, dict):
+                mapping['approved'] = True
+
+        self.callback(self.mappings)
+        self.destroy()
 
 
 class FinancialModelApp:
@@ -688,6 +1033,12 @@ End Function
         self.data_end_month = tk.StringVar(value=self.MONTHS[datetime.now().month - 1])
         self.data_end_year = tk.StringVar(value=str(datetime.now().year))
 
+        # Multi-division support
+        self.is_multi_division = tk.BooleanVar(value=False)
+        self.divisions = []  # List of division configs
+        self.division_configs = []  # List of DivisionConfig objects
+        self.account_mappings = {'pl': {}, 'bs': {}}  # Consolidated account mappings
+
         # Add trace to update display month when fiscal year start changes
         self.fiscal_start.trace_add('write', self._on_fiscal_start_change)
 
@@ -744,6 +1095,22 @@ End Function
                         command=self._toggle_mode).grid(row=0, column=0, sticky=tk.W, padx=(0, 20))
         ttk.Radiobutton(mode_frame, text="Update Existing Model", variable=self.mode, value="update",
                         command=self._toggle_mode).grid(row=0, column=1, sticky=tk.W)
+
+        # Division Structure (Multi-division support)
+        self.division_frame = ttk.LabelFrame(main_frame, text="Division Structure", padding="10")
+        self.division_frame.pack(fill=tk.X, pady=(0, 10))
+
+        ttk.Checkbutton(self.division_frame, text="Multiple Divisions / Departments",
+                        variable=self.is_multi_division,
+                        command=self._toggle_division_mode).grid(row=0, column=0, sticky=tk.W)
+
+        self.division_btn = ttk.Button(self.division_frame, text="Configure Divisions...",
+                                       command=self._open_division_setup, state='disabled')
+        self.division_btn.grid(row=0, column=1, padx=20)
+
+        self.division_status = ttk.Label(self.division_frame, text="Single entity mode",
+                                         font=('Segoe UI', 9), foreground='gray')
+        self.division_status.grid(row=0, column=2, sticky=tk.W)
 
         # Company Name (for new models only)
         self.name_frame = ttk.LabelFrame(main_frame, text="Company Information", padding="10")
@@ -870,6 +1237,33 @@ End Function
             self.config_frame.pack_forget()
             self.existing_frame.pack(fill=tk.X, pady=(0, 10), after=self.root.winfo_children()[0].winfo_children()[2])
             self.generate_btn.config(text="Update Financial Model")
+
+    def _toggle_division_mode(self):
+        """Toggle between single entity and multi-division modes"""
+        if self.is_multi_division.get():
+            self.division_btn.config(state='normal')
+            self.division_status.config(text="Multi-division mode - configure divisions")
+        else:
+            self.division_btn.config(state='disabled')
+            self.division_status.config(text="Single entity mode")
+            self.divisions = []
+            self.division_configs = []
+
+    def _open_division_setup(self):
+        """Open the division setup dialog"""
+        def on_divisions_saved(divisions):
+            self.divisions = divisions
+            count = len(divisions)
+            self.division_status.config(text=f"{count} division(s) configured")
+            # Clear the single-file paths since we'll use division-specific files
+            self.pl_path.set('')
+            self.bs_path.set('')
+
+        DivisionSetupDialog(self.root, on_divisions_saved, self.divisions)
+
+    def _handle_mapping_approval(self, approved_mappings):
+        """Handle approved mappings from the review dialog"""
+        self.account_mappings = approved_mappings
 
     def _browse_existing(self):
         """Browse for existing model file"""
@@ -2436,26 +2830,48 @@ End Sub
 
         return accounts, months, detected_totals
 
-    def _populate_source_sheet(self, sheet, accounts, months):
+    def _populate_source_sheet(self, sheet, accounts, months, division_name=None):
         """Populate a source data sheet with proper formatting
 
-        Structure:
+        Structure (single division / backward compatible):
         - Row 1: Headers (Account, month names like "Jan 24")
         - Row 2: YYYYMM helper values (e.g., 202401) for YTD calculations - hidden
         - Row 3+: Account data
+
+        Structure (multi-division mode when division_name provided):
+        - Row 1: Headers (Division, Account, month names)
+        - Row 2: YYYYMM helper values (hidden)
+        - Row 3+: Account data with Division in column A
+
+        Args:
+            sheet: xlwings sheet object
+            accounts: List of account dictionaries
+            months: List of (month, year, display_name) tuples
+            division_name: Optional division identifier for multi-division mode
         """
         # Colors - matching web version
         SOURCE_BLACK = (26, 26, 26)  # #1A1A1A - almost black for source sheets
 
+        # Determine column offsets based on division mode
+        has_division = division_name is not None or self.is_multi_division.get()
+        col_offset = 1 if has_division else 0  # Extra column for Division
+
         # Row 1: Header
-        sheet.range('A1').value = 'Account'
-        for i, (m, y, name) in enumerate(months):
-            sheet.range((1, i + 2)).value = name
+        if has_division:
+            sheet.range('A1').value = 'Division'
+            sheet.range('B1').value = 'Account'
+            for i, (m, y, name) in enumerate(months):
+                sheet.range((1, i + 3)).value = name
+        else:
+            sheet.range('A1').value = 'Account'
+            for i, (m, y, name) in enumerate(months):
+                sheet.range((1, i + 2)).value = name
 
         # Row 2: YYYYMM helper values for YTD calculations (e.g., 202411 for Nov 2024)
         # This enables SUMPRODUCT formulas to filter by year and month
+        start_col = 3 if has_division else 2
         for i, (m, y, name) in enumerate(months):
-            sheet.range((2, i + 2)).value = y * 100 + m
+            sheet.range((2, start_col + i)).value = y * 100 + m
 
         # Hide row 2 (helper row)
         try:
@@ -2465,8 +2881,17 @@ End Sub
 
         # Row 3+: Data - write all at once for speed and to ensure numbers are numbers
         data = []
+        # Use provided division_name or get from account if present
+        div_name = division_name or self.company_name.get()
+
         for account in accounts:
-            row = [account['name']]
+            # Get division from account if available, otherwise use provided or company name
+            acct_division = account.get('division', div_name)
+            if has_division:
+                row = [acct_division, account['name']]
+            else:
+                row = [account['name']]
+
             for m, y, _ in months:
                 val = account['values'].get((m, y), 0)
                 # Ensure it's a number
@@ -2483,7 +2908,8 @@ End Sub
 
         # Format header row with dark background and white text (like web version)
         try:
-            header_range = sheet.range((1, 1), (1, len(months) + 1))
+            num_cols = len(months) + (2 if has_division else 1)
+            header_range = sheet.range((1, 1), (1, num_cols))
             header_range.font.name = 'Calibri Light'
             header_range.font.size = 10
             header_range.font.bold = True
@@ -2491,7 +2917,7 @@ End Sub
             header_range.color = SOURCE_BLACK
 
             # Center align month headers
-            for col in range(2, len(months) + 2):
+            for col in range(start_col, num_cols + 1):
                 sheet.range((1, col)).api.HorizontalAlignment = -4108  # xlCenter
         except:
             pass
@@ -2499,22 +2925,35 @@ End Sub
         # Apply number format and font to data columns (now starting at row 3)
         if len(accounts) > 0 and len(months) > 0:
             try:
-                data_range = sheet.range((3, 2), (len(accounts) + 2, len(months) + 1))
+                data_range = sheet.range((3, start_col), (len(accounts) + 2, num_cols))
                 data_range.number_format = '#,##0'
                 data_range.font.name = 'Calibri Light'
                 data_range.font.size = 10
 
                 # Account names column
-                account_range = sheet.range((3, 1), (len(accounts) + 2, 1))
+                acct_col = 2 if has_division else 1
+                account_range = sheet.range((3, acct_col), (len(accounts) + 2, acct_col))
                 account_range.font.name = 'Calibri Light'
                 account_range.font.size = 10
+
+                # Division column if present
+                if has_division:
+                    div_range = sheet.range((3, 1), (len(accounts) + 2, 1))
+                    div_range.font.name = 'Calibri Light'
+                    div_range.font.size = 10
             except:
                 pass
 
         # Set column widths
-        sheet.range('A:A').column_width = 45
-        for col in range(2, len(months) + 2):
-            sheet.range((1, col), (1, col)).column_width = 14
+        if has_division:
+            sheet.range('A:A').column_width = 25  # Division column
+            sheet.range('B:B').column_width = 45  # Account column
+            for col in range(3, num_cols + 1):
+                sheet.range((1, col), (1, col)).column_width = 14
+        else:
+            sheet.range('A:A').column_width = 45
+            for col in range(2, len(months) + 2):
+                sheet.range((1, col), (1, col)).column_width = 14
 
     def _create_menu_sheet(self, sheet, months):
         """Create the menu/control sheet with proper formatting"""
@@ -5612,6 +6051,53 @@ End Sub
             col_num, remainder = divmod(col_num - 1, 26)
             result = chr(65 + remainder) + result
         return result
+
+    def _build_source_lookup_formula(self, source_sheet, account_name, col_num, division=None):
+        """Build a SUMIF or SUMIFS formula for looking up source data
+
+        Args:
+            source_sheet: Name of source sheet (e.g., "Source_PL")
+            account_name: Account name to look up
+            col_num: Column number for the value (1-based)
+            division: Optional division name for multi-division filtering
+
+        Returns:
+            Excel formula string
+        """
+        col_letter = self._col_letter(col_num)
+
+        if division or self.is_multi_division.get():
+            # Multi-division mode: Use SUMIFS with Division filter
+            # Structure: Division in A, Account in B, values start in C
+            div_filter = division if division else 'Menu!$G$5'  # Menu G5 will hold selected division
+            return (f'=SUMIFS({source_sheet}!{col_letter}:{col_letter},'
+                    f'{source_sheet}!$A:$A,"{div_filter}",'
+                    f'{source_sheet}!$B:$B,"{account_name}")')
+        else:
+            # Single division mode: Use SUMIF (backward compatible)
+            # Structure: Account in A, values start in B
+            return f'=SUMIF({source_sheet}!$A:$A,"{account_name}",{source_sheet}!{col_letter}:{col_letter})'
+
+    def _build_consolidated_formula(self, source_sheet, account_name, col_num):
+        """Build a formula that sums across all divisions (consolidated view)
+
+        Args:
+            source_sheet: Name of source sheet (e.g., "Source_PL")
+            account_name: Account name to look up
+            col_num: Column number for the value (1-based)
+
+        Returns:
+            Excel formula string for consolidated sum
+        """
+        col_letter = self._col_letter(col_num)
+
+        if self.is_multi_division.get():
+            # Consolidated: Sum all divisions (no division filter)
+            # In multi-division structure, account is in column B
+            return f'=SUMIF({source_sheet}!$B:$B,"{account_name}",{source_sheet}!{col_letter}:{col_letter})'
+        else:
+            # Single division: Same as regular lookup
+            return f'=SUMIF({source_sheet}!$A:$A,"{account_name}",{source_sheet}!{col_letter}:{col_letter})'
 
     def _group_columns_by_year(self, sheet, months, header_row):
         """
