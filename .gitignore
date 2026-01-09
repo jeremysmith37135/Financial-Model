@@ -49,3 +49,9 @@ _ul-*
 # Uncomment if you want to exclude Excel files
 # *.xlsm
 # *.xlsx
+
+# Archive folder (old versions)
+Archive/
+
+# Test output models
+Test/

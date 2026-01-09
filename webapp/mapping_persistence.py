@@ -134,20 +134,9 @@ class MappingPersistence:
             headers.extend([f'{d}_Account' for d in div_names])
             headers.extend(['Match_Type', 'Confidence', 'Approved', 'Reasoning', 'Updated'])
 
-            # Write headers
-            sheet.range('A1').value = headers
+            # BUILD ALL DATA IN MEMORY FIRST (OPTIMIZED)
+            all_rows = [headers]  # Start with headers
 
-            # Format header row
-            try:
-                header_range = sheet.range((1, 1), (1, len(headers)))
-                header_range.font.bold = True
-                header_range.color = (22, 33, 62)  # Dark blue
-                header_range.font.color = (255, 255, 255)  # White text
-            except:
-                pass
-
-            # Write mappings
-            row = 2
             for stmt_type in ['pl', 'bs']:
                 if stmt_type not in mappings:
                     continue
@@ -180,8 +169,20 @@ class MappingPersistence:
                         m.get('approved_date', datetime.now().isoformat())
                     ])
 
-                    sheet.range(f'A{row}').value = row_data
-                    row += 1
+                    all_rows.append(row_data)
+
+            # WRITE ALL DATA IN ONE BULK OPERATION
+            if all_rows:
+                sheet.range((1, 1), (len(all_rows), len(headers))).value = all_rows
+
+            # Format header row
+            try:
+                header_range = sheet.range((1, 1), (1, len(headers)))
+                header_range.font.bold = True
+                header_range.color = (22, 33, 62)  # Dark blue
+                header_range.font.color = (255, 255, 255)  # White text
+            except:
+                pass
 
             # Auto-fit columns
             try:

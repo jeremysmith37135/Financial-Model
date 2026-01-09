@@ -108,7 +108,11 @@ class ConsolidationEngine:
 
     def _find_exact_matches(self, accounts_by_division: Dict[str, List[Dict]]) -> Dict[str, AccountMapping]:
         """
-        Phase 1: Find accounts with identical names across all divisions
+        Phase 1: Find accounts with identical names across ANY divisions
+
+        Changed from original: Now matches accounts even if they only exist in some divisions.
+        An account named "6145 Insurance" in Division A and Division B will be consolidated
+        together even if Division C doesn't have it.
 
         Args:
             accounts_by_division: Dict mapping division name to list of account dicts
@@ -116,44 +120,43 @@ class ConsolidationEngine:
         Returns:
             Dictionary of exact match AccountMapping objects
         """
-        # Get primary division
-        primary_div = next((d for d in self.divisions if d.is_primary), self.divisions[0])
-        primary_accounts = accounts_by_division.get(primary_div.name, [])
-        other_div_names = [d.name for d in self.divisions if d.name != primary_div.name]
-
         exact_matches = {}
 
-        for account in primary_accounts:
-            name = account['name']
-            name_normalized = self._normalize_account_name(name)
+        # Collect ALL unique account names across all divisions (normalized)
+        all_account_names = {}  # normalized_name -> {div_name: original_name}
 
-            # Check if this exact name exists in all other divisions
-            matches_all = True
-            div_mappings = {primary_div.name: name}
+        for div_name, accounts in accounts_by_division.items():
+            for account in accounts:
+                if account.get('is_header', False):
+                    continue  # Skip headers
 
-            for other_name in other_div_names:
-                other_accounts = accounts_by_division.get(other_name, [])
-                other_account_names = [a['name'] for a in other_accounts]
-                other_normalized = [self._normalize_account_name(n) for n in other_account_names]
+                name = account['name']
+                name_normalized = self._normalize_account_name(name)
 
-                # Check for exact match (case-insensitive, whitespace-normalized)
-                if name_normalized in other_normalized:
-                    idx = other_normalized.index(name_normalized)
-                    div_mappings[other_name] = other_account_names[idx]
-                elif name in other_account_names:
-                    div_mappings[other_name] = name
-                else:
-                    matches_all = False
-                    break
+                if name_normalized not in all_account_names:
+                    all_account_names[name_normalized] = {}
+                all_account_names[name_normalized][div_name] = name
 
-            if matches_all and len(div_mappings) == len(self.divisions):
-                exact_matches[name] = AccountMapping(
-                    consolidated_name=name,
-                    division_mappings=div_mappings,
-                    match_type='exact',
-                    confidence=1.0,
-                    approved=True  # Auto-approve exact matches
-                )
+        # Create mappings for each unique account name
+        for name_normalized, div_mappings in all_account_names.items():
+            # Use the first division's name as the consolidated name (preserve original casing)
+            consolidated_name = list(div_mappings.values())[0]
+
+            # Determine match type based on how many divisions have this account
+            if len(div_mappings) == len(self.divisions):
+                match_type = 'exact'  # All divisions have it
+            elif len(div_mappings) > 1:
+                match_type = 'exact'  # Multiple divisions have it - still exact match
+            else:
+                match_type = 'division_specific'  # Only one division has it
+
+            exact_matches[consolidated_name] = AccountMapping(
+                consolidated_name=consolidated_name,
+                division_mappings=div_mappings,
+                match_type=match_type,
+                confidence=1.0,
+                approved=True  # Auto-approve exact matches
+            )
 
         return exact_matches
 
@@ -317,10 +320,14 @@ Important rules:
                             exact: Dict[str, AccountMapping],
                             intelligent: Dict[str, AccountMapping]) -> Dict[str, AccountMapping]:
         """
-        Phase 3: Create separate entries for unmatched accounts
+        Phase 3: Identify any remaining unmatched accounts
 
-        These accounts will appear separately in the consolidated report,
-        never discarded or suppressed.
+        With the new exact matching logic that matches accounts across ANY divisions
+        (not requiring all divisions to have the account), this should rarely find
+        anything. But we keep it as a safety net.
+
+        Note: We NO LONGER add "(Division)" suffix since the consolidated view
+        should just show the account name and sum across all divisions that have it.
         """
         all_existing = {**exact, **intelligent}
         unmatched_mappings = {}
@@ -332,19 +339,23 @@ Important rules:
                 if div_name in mapping.division_mappings:
                     matched_names.add(mapping.division_mappings[div_name])
 
-            # Create individual mappings for unmatched accounts
+            # Any remaining unmatched accounts (should be rare with new logic)
             for account in accounts:
                 name = account['name']
                 if name not in matched_names and not account.get('is_header', False):
-                    # Use division-prefixed name to avoid collisions
-                    cons_name = f"{name} ({div_name})"
-                    unmatched_mappings[cons_name] = AccountMapping(
-                        consolidated_name=cons_name,
-                        division_mappings={div_name: name},
-                        match_type='unmatched',
-                        confidence=1.0,
-                        approved=True  # Auto-approve unmatched (they're just included separately)
-                    )
+                    # Use the account name WITHOUT division prefix for consolidated view
+                    # The account will just show values from the divisions that have it
+                    if name not in unmatched_mappings:
+                        unmatched_mappings[name] = AccountMapping(
+                            consolidated_name=name,
+                            division_mappings={div_name: name},
+                            match_type='division_specific',
+                            confidence=1.0,
+                            approved=True
+                        )
+                    else:
+                        # Add this division to existing mapping
+                        unmatched_mappings[name].division_mappings[div_name] = name
 
         return unmatched_mappings
 
@@ -409,7 +420,232 @@ Important rules:
 
             consolidated.append(cons_account)
 
-        return consolidated
+        # Sort accounts to maintain proper P&L/BS structure
+        sorted_accounts = self._sort_accounts_by_section(consolidated, statement_type)
+        return sorted_accounts
+
+    def _sort_accounts_by_section(self, accounts: List[Dict], statement_type: str) -> List[Dict]:
+        """Sort accounts to maintain proper financial statement structure.
+
+        REWRITTEN: Uses strict P&L ordering to ensure proper structure:
+        1. Income (Revenue) section
+        2. Cost of Goods Sold section
+        3. Gross Profit (summary line)
+        4. Operating Expenses section
+        5. Net Operating Income (summary line)
+        6. Other Income section
+        7. Other Expenses section
+        8. Net Income (final line)
+
+        Accounts are sorted by:
+        1. Exact match to primary division order (highest priority)
+        2. Account number prefix (4xxx=Income, 5xxx=COGS, 6xxx=Expenses, etc.)
+        3. Keyword matching as fallback
+        """
+        import re
+
+        if not accounts or not self.divisions:
+            return accounts
+
+        # Get the primary division or first division
+        primary_div = None
+        for div in self.divisions:
+            if div.is_primary:
+                primary_div = div
+                break
+        if not primary_div:
+            primary_div = self.divisions[0]
+
+        # Get the reference account order from primary division
+        if statement_type == "pl":
+            ref_accounts = primary_div.pl_accounts
+        else:
+            ref_accounts = primary_div.bs_accounts
+
+        # Build comprehensive order map and identify section boundaries
+        order_map = {}  # normalized_name -> (position, section)
+        current_section = 1  # Start in Income section
+
+        # P&L Section definitions:
+        # 1 = Income, 2 = COGS, 3 = Expenses, 4 = Other Income, 5 = Other Expense, 6 = Net Income
+
+        for idx, acct in enumerate(ref_accounts):
+            name_lower = acct['name'].lower().strip()
+
+            # Detect section transitions based on summary/total lines
+            if statement_type == "pl":
+                # After "Total for Income" or similar, move to COGS
+                if current_section == 1 and ('total' in name_lower and 'income' in name_lower and 'net' not in name_lower and 'other' not in name_lower):
+                    current_section = 2
+                # After "Gross Profit", move to Expenses
+                elif current_section <= 2 and 'gross profit' in name_lower:
+                    current_section = 3
+                # After "Total for Expenses" or "Net Operating Income", move to Other Income
+                elif current_section == 3 and ('total' in name_lower and 'expense' in name_lower):
+                    current_section = 4
+                elif current_section == 3 and 'net operating income' in name_lower:
+                    current_section = 4
+                # After "Total for Other Income", move to Other Expense
+                elif current_section == 4 and 'total' in name_lower and 'other income' in name_lower:
+                    current_section = 5
+                # "Net Income" is always section 6
+                elif 'net income' in name_lower and 'operating' not in name_lower and 'other' not in name_lower:
+                    order_map[name_lower] = (idx, 6)
+                    continue
+
+            order_map[name_lower] = (idx, current_section)
+
+        def get_account_section(acct_name: str) -> int:
+            """Determine P&L section for an account. Returns section number 1-6."""
+            name = acct_name.strip()
+            name_lower = name.lower()
+
+            # Check if it's a known summary/total line - these have fixed positions
+            if 'net income' in name_lower and 'operating' not in name_lower and 'other' not in name_lower:
+                return 6  # Net Income is always last
+            if 'gross profit' in name_lower:
+                return 2  # Gross Profit ends COGS section
+            if 'net operating income' in name_lower or 'operating income' in name_lower:
+                return 3  # Net Operating Income ends Expenses section
+
+            # First try: Account number prefix
+            match = re.match(r'^(\d{3,5})', name)
+            if match:
+                acct_num = int(match.group(1))
+                # Normalize to 4-digit format
+                while acct_num < 1000:
+                    acct_num *= 10
+                while acct_num >= 10000:
+                    acct_num //= 10
+
+                if 4000 <= acct_num < 5000:
+                    return 1  # Income (4xxx)
+                elif 5000 <= acct_num < 6000:
+                    return 2  # COGS (5xxx)
+                elif 6000 <= acct_num < 7000:
+                    return 3  # Expenses (6xxx)
+                elif 7000 <= acct_num < 8000:
+                    return 4  # Other Income (7xxx)
+                elif 8000 <= acct_num < 9000:
+                    return 5  # Other Expense (8xxx)
+
+            # Second try: Keyword matching (more specific patterns first)
+
+            # Check for "Total" lines - these stay in their section
+            if 'total' in name_lower:
+                if 'income' in name_lower and 'other' not in name_lower and 'net' not in name_lower:
+                    return 1  # Total Income
+                if 'cost' in name_lower or 'cogs' in name_lower or 'goods' in name_lower:
+                    return 2  # Total COGS
+                if 'expense' in name_lower and 'other' not in name_lower:
+                    return 3  # Total Expenses
+                if 'other income' in name_lower:
+                    return 4  # Total Other Income
+                if 'other expense' in name_lower:
+                    return 5  # Total Other Expense
+
+            # Other Income keywords (check before general income)
+            if 'other income' in name_lower or 'miscellaneous income' in name_lower:
+                return 4
+
+            # Other Expense keywords (check before general expense)
+            if 'other expense' in name_lower or 'loss on' in name_lower or 'write-off' in name_lower:
+                return 5
+
+            # COGS keywords (check before expense since some overlap)
+            cogs_patterns = [
+                'cost of goods', 'cost of sales', 'cost of service', 'cogs',
+                'direct cost', 'direct labor', 'direct material',
+                'purchases', 'freight in', 'manufacturing', 'production',
+                'job cost', 'subcontract', 'contract labor'
+            ]
+            if any(p in name_lower for p in cogs_patterns):
+                return 2
+
+            # Income keywords (revenue)
+            income_patterns = [
+                'revenue', 'sales', 'income', 'fees earned', 'service fee',
+                'consulting fee', 'commission', 'royalt', 'dividend received',
+                'interest earned', 'rental income', 'gain on'
+            ]
+            # Must NOT be expense-related
+            expense_related = ['expense', 'cost', 'loss']
+            if any(p in name_lower for p in income_patterns):
+                if not any(e in name_lower for e in expense_related):
+                    return 1
+
+            # Expense keywords (operating expenses)
+            expense_patterns = [
+                'expense', 'rent', 'lease', 'utilities', 'electric', 'gas bill', 'water',
+                'telephone', 'phone', 'internet', 'insurance', 'depreciation', 'amortization',
+                'payroll', 'salary', 'salaries', 'wages', 'compensation', 'benefits',
+                'tax', 'taxes', 'license', 'permit', 'dues', 'subscription',
+                'advertising', 'marketing', 'promotion', 'office supplies', 'postage',
+                'shipping', 'delivery', 'travel', 'meal', 'entertainment',
+                'auto', 'vehicle', 'fuel', 'mileage', 'repair', 'maintenance',
+                'professional fee', 'legal', 'accounting', 'consulting', 'bank charge',
+                'credit card fee', 'interest paid', 'training', 'education',
+                'software', 'computer', 'equipment', 'security', 'uniform', 'tool'
+            ]
+            if any(p in name_lower for p in expense_patterns):
+                return 3
+
+            # If we found this account in the reference, use its section
+            if name_lower in order_map:
+                return order_map[name_lower][1]
+
+            # Last resort: Search through all divisions to find position context
+            for div in self.divisions:
+                div_accounts = div.pl_accounts
+                section = 1
+
+                for acct in div_accounts:
+                    acct_lower = acct['name'].lower().strip()
+
+                    # Track section transitions
+                    if 'total' in acct_lower and 'income' in acct_lower and 'net' not in acct_lower and 'other' not in acct_lower:
+                        section = 2
+                    elif 'gross profit' in acct_lower:
+                        section = 3
+                    elif section == 3 and ('total' in acct_lower and 'expense' in acct_lower):
+                        section = 4
+                    elif 'net operating' in acct_lower:
+                        section = 4
+
+                    if acct_lower == name_lower:
+                        return section
+
+            return 3  # Default to expenses if truly unknown
+
+        def get_sort_key(acct):
+            """Generate sort key ensuring proper P&L structure."""
+            name = acct['name']
+            name_lower = name.lower().strip()
+            is_total = acct.get('is_total', False)
+            is_header = acct.get('is_header', False)
+
+            # If exact match in reference, use that position
+            if name_lower in order_map:
+                pos, section = order_map[name_lower]
+                # Use section as primary sort, then position within section
+                return (section, 0, pos, name)
+
+            # Otherwise categorize and place after matching accounts in that section
+            section = get_account_section(name)
+
+            # Headers come first in section, totals come last in section
+            if is_header:
+                sub_order = 0
+            elif is_total or 'total' in name_lower:
+                sub_order = 2
+            else:
+                sub_order = 1
+
+            # Use section, then sub_order, then alphabetical
+            return (section, sub_order, 999, name)
+
+        sorted_accounts = sorted(accounts, key=get_sort_key)
+        return sorted_accounts
 
     def update_mapping(self,
                        consolidated_name: str,

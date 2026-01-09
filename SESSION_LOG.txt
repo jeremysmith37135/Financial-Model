@@ -1,0 +1,187 @@
+================================================================================
+CFO DNA FINANCIAL MODEL GENERATOR - SESSION LOG
+================================================================================
+Instructions: Update this file at the END of each work session with what was
+accomplished, issues encountered, and next steps. This ensures continuity
+between sessions.
+
+================================================================================
+SESSION: January 09, 2026
+================================================================================
+Duration: [In Progress]
+
+ACCOMPLISHED:
+- Reviewed project status and documentation
+- Discovered 1/2/2026 session changes were not documented
+- Updated TODO_NEXT_SESSION.txt with current status
+- Created this SESSION_LOG.txt file for better session tracking
+- Located latest EXE: webapp\dist\CFO_Financial_Model_Generator_v2.1.4b.exe
+
+TEMPLATE V2 ARCHITECTURE (Major Initiative):
+- Created detailed plan for template-based optimization (see .claude/plans/)
+- Goal: Reduce build time from 3-4 minutes to under 1 minute
+- Approach: "Clone, Inject, Adjust" pattern instead of building from scratch
+
+Phase 1 Progress:
+1. [DONE] Updated APP_VERSION to 3.0.0
+2. [DONE] Added TEMPLATE_V2_PATH and USE_TEMPLATE_V2 constants
+3. [DONE] Added template utility functions to desktop_app.py
+4. [DONE] Created test_template_v2.py script
+5. [DONE] Created build_template_optimized.py - comprehensive template builder
+
+6. [DONE] Generated COMPLETE DNA_Template_v2.xlsm (45.5 KB, 17 seconds):
+   - _TPL_PL: 112 rows x 22 cols - Full P&L with Income, COGS, Gross Profit,
+     Operating Expenses, Net Operating Income, Other Income, Other Expense,
+     Net Income. All formulas pre-built: SUM for monthly totals, SUMPRODUCT
+     for YTD with Menu!$E$7/$F$7 references.
+   - _TPL_BS: 82 rows x 13 cols - Balance Sheet with Current Assets, Fixed
+     Assets, Total Assets, Current Liabilities, Long-term Liabilities,
+     Total Liabilities, Equity, Total Liabilities & Equity sections.
+   - _TPL_CF: 30 rows x 13 cols - Cash Flow with Operating (Net Income,
+     Adjustments, Working Capital), Investing, Financing activities, and
+     Net Change in Cash / Ending Cash Balance formulas.
+   - _TPL_Forecast: 55 rows x 61 cols - 12 months x 5 columns each
+     (Budget, Actual, Var$, Var%, Notes) with variance formulas.
+   - _TPL_Forecast_Summary: 54 rows x 9 cols - YTD summary with variance formulas.
+   - Menu: Company name placeholder, E7/F7 for current month/year.
+   - Source_PL, Source_BS, Source_Budget: Data source headers.
+   - Notes: Annotation structure.
+   - Dashboard_Control: KPI configuration structure.
+
+ISSUES ENCOUNTERED:
+- Excel COM instability with visible=False mode (fixed: use visible=True)
+- External sheet references (Menu!, Consolidated_PL!) cause hangs when sheets don't exist
+  (fixed: build Menu first, use placeholders for undefined sheets)
+- Large bulk writes with complex SUMPRODUCT formulas can cause COM errors
+  (fixed: added delays, error handling, and reduced formatting operations)
+
+REMAINING FOR TEMPLATE V2:
+- Integrate template-based generation into desktop_app.py
+- Refactor _create_pl_report_multi_div() to use template clone/inject pattern
+- Test and validate output matches original
+- Measure timing improvement
+
+NEXT STEPS:
+1. Refactor P&L generation to use _clone_template_sheet() + _inject_accounts_bulk()
+2. Test with real data
+3. If successful, proceed to refactor BS, CF, Forecast similarly
+
+--------------------------------------------------------------------------------
+CONTINUATION SESSION: January 09, 2026 (Afternoon)
+--------------------------------------------------------------------------------
+Duration: ~2 hours
+
+ACCOMPLISHED:
+1. Single-Entity Mode Optimization
+   - Changed single-entity mode to use optimized bulk-write functions
+   - _create_pl_report_multi_div() with single_entity_mode=True
+   - _create_bs_report_multi_div() with single_entity_mode=True
+   - Expected speed improvement from 2-3 minutes to ~30 seconds
+
+2. Forecast Sheet Fixes
+   - Fixed actual data not showing for months beyond January
+   - Changed fallback behavior: instead of returning '0', now creates IFERROR formula
+   - Fixed headers to show "Actual" for past months, "Forecast" for future months
+
+3. Balance Sheet Professional Formatting
+   - Added Calibri Light font throughout
+   - Bold section headers with larger font
+   - Total rows with top border (accounting style)
+   - Total Assets and Total Liabilities & Equity with double underline
+
+4. Single/Multi-Division Code Consistency
+   - Verified both modes use same optimized core functions
+   - Sheet ordering now matches between modes:
+     Dashboard, Menu, P&L, Balance_Sheet, Cash_Flow, Forecast, Forecast_Summary,
+     Notes, Dashboard_Control, Source_PL, Source_BS, Source_Budget
+
+5. Built New EXE
+   - CFO_Financial_Model_Generator_v3.0.0.exe (90 MB)
+   - Located at: webapp\dist\CFO_Financial_Model_Generator_v3.0.0.exe
+
+TECHNICAL CHANGES:
+- desktop_app.py: Added single_entity_mode parameter to _create_pl_report_multi_div()
+  and _create_bs_report_multi_div() to handle different Source_PL column layouts
+- Single-entity: col A=Account, data starts col B
+- Multi-div: col A=Division, col B=Account, data starts col C
+
+REMAINING ISSUES:
+- Need user testing to verify all changes work correctly
+
+================================================================================
+SESSION: January 02, 2026 (Reconstructed from code changes)
+================================================================================
+Duration: ~3 hours (8:34 AM - 11:14 AM based on timing log)
+
+ACCOMPLISHED:
+1. Performance Timing System
+   - Created StepTimer class for tracking execution time
+   - Logs to timing_log.json with averages across runs
+   - Prints timing summary after each run
+
+2. Division Date Range Support
+   - Added start/end month and year fields per division
+   - Enhanced DivisionSetupDialog UI (resizable, 750x600)
+
+3. Consolidation Engine Overhaul
+   - Rewrote _find_exact_matches() to match across ANY divisions
+   - Previously required ALL divisions to have an account
+   - Removed "(Division)" suffix from consolidated accounts
+   - Added _sort_accounts_by_section() for proper P&L ordering
+
+4. Testing
+   - Ran 7 test generations with 5 divisions
+   - Run times: 162s - 808s (varies with sorting complexity)
+   - Built v2.1.4 and v2.1.4b EXEs
+
+ISSUES/BLOCKERS:
+- Performance regression: P&L sorting can take 130+ seconds
+- Some runs took 13+ minutes due to sorting overhead
+
+NOT COMMITTED:
+- All changes remain uncommitted on dev branch
+
+================================================================================
+SESSION: December 20, 2025 (from timing log)
+================================================================================
+Duration: Unknown
+
+ACCOMPLISHED:
+- 3 test runs performed
+- Run times: 104s - 130s
+- Testing multi-division model generation
+
+================================================================================
+SESSION: December 16, 2025
+================================================================================
+ACCOMPLISHED:
+- Completed Phase 2: Multi-Division Model Generation
+- Committed: "Complete Phase 2: Multi-Division Model Generation"
+- Version 2.0.0 established
+
+================================================================================
+SESSION: December 09, 2025
+================================================================================
+ACCOMPLISHED:
+- Fixed YTD helper formulas: E7=MONTH(C7), F7=YEAR(C7)
+- Added "Jan-Nov" date range label above YTD columns
+- Cashflow columns now AutoFit
+- YYYYMM helper values hidden with white font
+
+================================================================================
+TEMPLATE - Copy for new sessions:
+================================================================================
+SESSION: [DATE]
+================================================================================
+Duration:
+
+ACCOMPLISHED:
+-
+
+ISSUES/BLOCKERS:
+-
+
+NEXT STEPS:
+-
+
+================================================================================
