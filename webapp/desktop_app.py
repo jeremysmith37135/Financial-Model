@@ -2789,7 +2789,7 @@ End Sub
         # Variable steps: 3 per division (read files, division sheets, division forecasts)
         # Count: 18 fixed steps + 3 per division (read files, create sheets, create forecast)
         total_steps = 18 + (3 * num_divisions)
-        estimated_total = 90 + (num_divisions - 1) * 20  # Base ~1.5 min + 20s per extra division
+        estimated_total = 180 + (num_divisions - 1) * 30  # Base ~3 min + 30s per extra division (conservative)
 
         # Create progress tracker for mid-step updates
         update_step, update_substep, state = self._create_progress_tracker(total_steps, estimated_total)
@@ -4311,7 +4311,7 @@ End Sub
 
         # Single entity mode - use progress tracker for consistent UI
         total_steps = 13  # 12 main steps + 1 finalizing step
-        estimated_total = 30  # Estimated seconds for single-entity mode
+        estimated_total = 90  # Estimated seconds for single-entity mode (conservative)
         update_step, update_substep, state = self._create_progress_tracker(total_steps, estimated_total)
 
         # Parse input files with indentation detection
@@ -6942,15 +6942,18 @@ End Sub
     # =========================================================================
 
     def _create_source_budget_sheet(self, sheet, accounts, months):
-        """Create Source_Budget sheet with structure matching Source_PL for budget data import.
+        """Create Source_Budget sheet with 12 months for full-year budgeting.
 
         Structure:
         - Row 1: Company name title
         - Row 2: "Budget" subtitle
         - Row 3: Blank
-        - Row 4: Headers (Account, month names like "Jan 24")
+        - Row 4: Headers (Account, Jan-Dec month names like "Jan 24")
         - Row 5: YYYYMM helper values (e.g., 202401) for formula lookups - hidden
         - Row 6+: Account data with indentation (initially zeros, populated via budget import)
+
+        Note: Unlike Source_PL which only has actual data months, Source_Budget always
+        has all 12 months of the year to support full-year forecasting.
         """
         # Colors - matching source sheets
         SOURCE_BLACK = (26, 26, 26)  # #1A1A1A
@@ -6958,6 +6961,20 @@ End Sub
         SUBTOTAL_GRAY = (236, 236, 236)
 
         company = self.company_name.get() if hasattr(self, 'company_name') else 'Company'
+
+        # Determine the budget year from the last month in the data
+        budget_year = months[-1][1] if months else datetime.now().year
+        year_suffix = str(budget_year)[-2:]
+
+        # Create full 12-month list for budget (Jan-Dec of budget year)
+        month_abbrevs = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+                         'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+        budget_months = []
+        for m in range(1, 13):
+            name = f"{month_abbrevs[m-1]} {year_suffix}"
+            budget_months.append((m, budget_year, name))
+
+        print(f"[Source_Budget] Creating 12-month budget for year {budget_year}")
 
         # Row 1: Company name title
         sheet.range('A1').value = company
@@ -6973,13 +6990,13 @@ End Sub
 
         header_row = 4
 
-        # Row 4: Headers
+        # Row 4: Headers - always 12 months (Jan-Dec)
         sheet.range(f'A{header_row}').value = 'Account'
-        for i, (m, y, name) in enumerate(months):
+        for i, (m, y, name) in enumerate(budget_months):
             sheet.range((header_row, i + 2)).value = name
 
         # Row 5: YYYYMM helper values for formula lookups
-        for i, (m, y, name) in enumerate(months):
+        for i, (m, y, name) in enumerate(budget_months):
             sheet.range((header_row + 1, i + 2)).value = y * 100 + m
 
         # Hide row 5 (helper row)
@@ -7005,31 +7022,32 @@ End Sub
                 display_name = account_name
 
             row = [display_name]
-            for _ in range(len(months)):
+            for _ in range(12):  # Always 12 months
                 row.append(0)  # Initialize with zeros
             data.append(row)
 
         if data:
             sheet.range(f'A{data_start_row}').value = data
 
-        # Format header row
+        # Format header row (always 12 months + Account column = 13 columns)
+        num_budget_cols = 12
         try:
-            header_range = sheet.range((header_row, 1), (header_row, len(months) + 1))
+            header_range = sheet.range((header_row, 1), (header_row, num_budget_cols + 1))
             header_range.font.name = 'Calibri Light'
             header_range.font.size = 10
             header_range.font.bold = True
             header_range.font.color = (255, 255, 255)
             header_range.color = SOURCE_BLACK
 
-            for col in range(2, len(months) + 2):
+            for col in range(2, num_budget_cols + 2):
                 sheet.range((header_row, col)).api.HorizontalAlignment = -4108  # xlCenter
         except:
             pass
 
         # Format data area with proper styling for headers/totals
-        if len(accounts) > 0 and len(months) > 0:
+        if len(accounts) > 0:
             try:
-                data_range = sheet.range((data_start_row, 2), (data_start_row + len(accounts) - 1, len(months) + 1))
+                data_range = sheet.range((data_start_row, 2), (data_start_row + len(accounts) - 1, num_budget_cols + 1))
                 data_range.number_format = '#,##0'
                 data_range.font.name = 'Calibri Light'
                 data_range.font.size = 10
@@ -7044,7 +7062,7 @@ End Sub
                     if account.get('is_header', False):
                         sheet.range((row_num, 1)).font.bold = True
                     elif account.get('is_total', False):
-                        row_range = sheet.range((row_num, 1), (row_num, len(months) + 1))
+                        row_range = sheet.range((row_num, 1), (row_num, num_budget_cols + 1))
                         row_range.font.bold = True
                         row_range.color = SUBTOTAL_GRAY
             except:
@@ -7052,11 +7070,11 @@ End Sub
 
         # Set column widths
         sheet.range('A:A').column_width = 45
-        for col in range(2, len(months) + 2):
+        for col in range(2, num_budget_cols + 2):
             sheet.range((1, col), (1, col)).column_width = 14
 
-        # Group and collapse previous year columns
-        self._group_previous_year_columns(sheet, months, data_start_col=2)
+        # Group and collapse previous year columns (use budget_months instead of months)
+        self._group_previous_year_columns(sheet, budget_months, data_start_col=2)
 
         # Add back to menu link
         self._add_back_to_menu_link(sheet, row=1, col=1)
@@ -7240,7 +7258,7 @@ End Sub
                 budget_letter = self._col_letter(start_col + COL_BUDGET)
                 adj_letter = self._col_letter(start_col + COL_ADJ)
 
-                # Get the source column for this month (using month, year tuple)
+                # Get the source column for ACTUAL data from Source_PL (using month, year tuple)
                 month_key = (month_num, current_year)
                 if month_key in month_year_to_source_col:
                     source_col_letter = self._col_letter(month_year_to_source_col[month_key])
@@ -7249,14 +7267,14 @@ End Sub
                         actual_formula = f'=IFERROR(SUMIFS(Source_PL!{source_col_letter}$3:{source_col_letter}$1500,Source_PL!$A$3:$A$1500,"{division_name}",Source_PL!$B$3:$B$1500,TRIM(A{r})),0)'
                     else:
                         actual_formula = f'=IFERROR(SUMIF(Source_PL!${source_acct_col}$3:${source_acct_col}$1500,TRIM(A{r}),Source_PL!{source_col_letter}$3:{source_col_letter}$1500),0)'
-                    # BUDGET formula - pull from Source_Budget using same column
-                    budget_formula = f'=IFERROR(SUMIF(Source_Budget!$A$6:$A$1500,TRIM(A{r}),Source_Budget!{source_col_letter}$6:{source_col_letter}$1500),0)'
                 else:
                     # Month not in source data - no actual data available
                     actual_formula = '0'
-                    # Budget still tries to pull using month index (assumes Source_Budget has Jan-Dec in order)
-                    budget_col_letter = self._col_letter(source_data_start_col + month_idx)
-                    budget_formula = f'=IFERROR(SUMIF(Source_Budget!$A$6:$A$1500,TRIM(A{r}),Source_Budget!{budget_col_letter}$6:{budget_col_letter}$1500),0)'
+
+                # BUDGET formula - Source_Budget ALWAYS has Jan-Dec in columns B-M (2-13)
+                # So Jan=B, Feb=C, Mar=D, etc. (column = 2 + month_idx where month_idx is 0-11)
+                budget_col_letter = self._col_letter(2 + month_idx)
+                budget_formula = f'=IFERROR(SUMIF(Source_Budget!$A$6:$A$1500,TRIM(A{r}),Source_Budget!{budget_col_letter}$6:{budget_col_letter}$1500),0)'
 
                 # FORECAST formula
                 if is_past_month:
@@ -8443,10 +8461,14 @@ End Sub
         sheet.range((11, chart_data_col + 2), (10 + num_data_rows, chart_data_col + 2)).number_format = '"$"#,##0'
         sheet.range((11, chart_data_col + 3), (10 + num_data_rows, chart_data_col + 3)).number_format = '0.0%'
 
-        # Hide the chart data columns (N through Q)
+        # Make chart data columns nearly invisible (but not hidden - hidden columns break charts)
+        # Use white font on white background and narrow width instead of hiding
         try:
             for col in range(chart_data_col, chart_data_col + 4):
-                sheet.range((1, col)).column_width = 0
+                col_range = sheet.range((1, col), (25, col))  # Cover enough rows
+                col_range.font.color = (255, 255, 255)  # White text
+                col_range.color = (255, 255, 255)  # White background
+                sheet.range((1, col)).column_width = 0.5  # Very narrow but not hidden
         except:
             pass
 

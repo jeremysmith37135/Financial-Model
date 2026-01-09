@@ -30,7 +30,8 @@
       "Bash(taskkill:*)",
       "Bash(del \"dist\\\\CFO_Financial_Model_Generator_v3.0.0.exe\")",
       "Bash(move \"dist\\\\CFO_Financial_Model_Generator_v3.0.0.exe\" \"dist\\\\CFO_Financial_Model_Generator_v3.0.0_old.exe\")",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(git commit:*)"
     ]
   }
 }
