@@ -162,6 +162,48 @@ NEXT STEPS:
 4. Consider further progress bar improvements
 
 ================================================================================
+FUTURE ROADMAP (Discussed January 09, 2026)
+================================================================================
+
+1. WEB-BASED APPLICATION CONVERSION
+   - Can keep xlwings/VBA by running on Windows server with Excel
+   - Architecture: Web frontend (Flask) → Windows backend (xlwings)
+   - AutoBudget project (C:\Users\jerju\OneDrive\Focus CFO\AI\AutoBudget)
+     already has working Flask web interface
+   - Combined tool would integrate budget creation + financial model generation
+   - Effort estimate: 4-6 days to make desktop_app.py GUI-independent
+   - Key task: Extract core generator logic from GUI code
+
+2. STANDALONE INSTALLER PACKAGE
+   - Use Inno Setup (free) to create professional Windows installer
+   - Single .exe download → installs to Program Files
+   - Includes: app, templates, icons, shortcuts
+   - Checks for Excel dependency
+   - Handles license activation on first run
+
+3. LICENSING SYSTEM DESIGN
+   - Formula: License = HMAC(secret, email + machine_id + year)
+   - Deterministic: same inputs = same key every time
+   - Machine binding: key only works on registered machine
+   - Annual renewal: year component forces new key each year
+   - User flow:
+     a. First run shows Machine ID
+     b. User sends email + Machine ID to Focus CFO
+     c. Focus CFO generates key and sends to user
+     d. User enters key, software activates
+     e. Repeat annually for renewal
+   - Future enhancement: Online validation endpoint for real-time checks
+
+4. AUTOBUDGET INTEGRATION
+   - Location: C:\Users\jerju\OneDrive\Focus CFO\AI\AutoBudget
+   - Already has: Flask web app, budget template generation
+   - Could combine into "CFO Financial Suite":
+     * Step 1: Create budget template (AutoBudget)
+     * Step 2: User fills in budget
+     * Step 3: Import actuals (P&L + BS)
+     * Step 4: Generate full financial model (DNA Model)
+
+================================================================================
 SESSION: January 02, 2026 (Reconstructed from code changes)
 ================================================================================
 Duration: ~3 hours (8:34 AM - 11:14 AM based on timing log)
