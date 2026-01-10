@@ -194,6 +194,42 @@ FUTURE ROADMAP (Discussed January 09, 2026)
      e. Repeat annually for renewal
    - Future enhancement: Online validation endpoint for real-time checks
 
+   SECURITY CONSIDERATIONS (evaluate before implementation):
+
+   VULNERABILITY: PyInstaller .exe can be decompiled. If SECRET_KEY is in the
+   app code, someone could extract it and generate their own keys.
+
+   PROTECTION OPTIONS (weakest to strongest):
+
+   a) HMAC + Obfuscation (Basic)
+      - Use PyArmor/Nuitka to obfuscate code
+      - Stops casual inspection, not skilled reversers
+      - Effort: Low | Protection: Moderate
+
+   b) Asymmetric Cryptography (Recommended)
+      - Private key stays with Focus CFO (generates licenses)
+      - Public key in app (can verify but NOT generate)
+      - Even full decompilation doesn't help attacker
+      - Mathematically impossible to derive private from public
+      - Effort: Medium | Protection: Strong
+
+   c) Online Validation (Strongest)
+      - App calls Focus CFO server to validate
+      - Secret never leaves server
+      - Can revoke licenses instantly, track usage
+      - Requires internet (can fallback to offline)
+      - Effort: Medium | Protection: Very Strong
+
+   d) Layered Approach (Best)
+      - Combine: Asymmetric keys + Online check + Obfuscation
+      - Effort: Medium-High | Protection: Excellent
+
+   PRACTICAL NOTES:
+   - Target users are CFOs, not hackers
+   - Goal is preventing casual sharing, not defeating determined crackers
+   - Asymmetric crypto is best balance of effort vs protection
+   - Machine binding prevents key sharing between computers
+
 4. AUTOBUDGET INTEGRATION
    - Location: C:\Users\jerju\OneDrive\Focus CFO\AI\AutoBudget
    - Already has: Flask web app, budget template generation
