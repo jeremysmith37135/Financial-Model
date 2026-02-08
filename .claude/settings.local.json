@@ -31,7 +31,19 @@
       "Bash(del \"dist\\\\CFO_Financial_Model_Generator_v3.0.0.exe\")",
       "Bash(move \"dist\\\\CFO_Financial_Model_Generator_v3.0.0.exe\" \"dist\\\\CFO_Financial_Model_Generator_v3.0.0_old.exe\")",
       "Bash(git add:*)",
-      "Bash(git commit:*)"
+      "Bash(git commit:*)",
+      "Bash(echo:*)",
+      "Bash(del CFO_Financial_Model_Generator_v3.2.5.spec)",
+      "Bash(del \"C:\\\\Users\\\\jerju\\\\OneDrive\\\\Focus CFO\\\\AI\\\\DNA Model\\\\webapp\\\\__pycache__\\\\desktop_app.cpython-313.pyc\")",
+      "Bash(powershell.exe -NoProfile -Command \"Remove-Item ''C:\\\\Users\\\\jerju\\\\OneDrive\\\\Focus CFO\\\\AI\\\\DNA Model\\\\webapp\\\\dist\\\\CFO_Financial_Model_Generator_v3.2.5.exe'',''C:\\\\Users\\\\jerju\\\\OneDrive\\\\Focus CFO\\\\AI\\\\DNA Model\\\\webapp\\\\dist\\\\CFO_Financial_Model_Generator_v3.2.6.exe'',''C:\\\\Users\\\\jerju\\\\OneDrive\\\\Focus CFO\\\\AI\\\\DNA Model\\\\webapp\\\\dist\\\\CFO_Financial_Model_Generator_v3.2.7.exe'',''C:\\\\Users\\\\jerju\\\\OneDrive\\\\Focus CFO\\\\AI\\\\DNA Model\\\\webapp\\\\dist\\\\CFO_Financial_Model_Generator_v3.2.8.exe'',''C:\\\\Users\\\\jerju\\\\OneDrive\\\\Focus CFO\\\\AI\\\\DNA Model\\\\webapp\\\\dist\\\\CFO_Financial_Model_Generator_v3.2.9.exe'',''C:\\\\Users\\\\jerju\\\\OneDrive\\\\Focus CFO\\\\AI\\\\DNA Model\\\\webapp\\\\dist\\\\CFO_Financial_Model_Generator_v3.2.10.exe'',''C:\\\\Users\\\\jerju\\\\OneDrive\\\\Focus CFO\\\\AI\\\\DNA Model\\\\webapp\\\\dist\\\\CFO_Financial_Model_Generator_v3.2.11.exe'' -Force -ErrorAction SilentlyContinue; Write-Host ''Cleaned old exe files''\")",
+      "Bash(powershell.exe -NoProfile -Command \"Remove-Item ''C:\\\\Users\\\\jerju\\\\OneDrive\\\\Focus CFO\\\\AI\\\\DNA Model\\\\webapp\\\\build'' -Recurse -Force -ErrorAction SilentlyContinue; Write-Host ''Cleaned build folder''\")",
+      "Bash(powershell.exe -NoProfile -Command \"Remove-Item ''C:\\\\Users\\\\jerju\\\\OneDrive\\\\Focus CFO\\\\AI\\\\DNA Model\\\\webapp\\\\dist\\\\CFO_Financial_Model_Generator_v3.2.12.exe'' -Force -ErrorAction SilentlyContinue; Remove-Item ''C:\\\\Users\\\\jerju\\\\OneDrive\\\\Focus CFO\\\\AI\\\\DNA Model\\\\webapp\\\\build'' -Recurse -Force -ErrorAction SilentlyContinue; Remove-Item ''C:\\\\Users\\\\jerju\\\\OneDrive\\\\Focus CFO\\\\AI\\\\DNA Model\\\\webapp\\\\*.spec'' -Force -ErrorAction SilentlyContinue; Write-Host ''Cleaned old files''\")",
+      "Bash(done)",
+      "Bash(git -C \"C:\\\\Users\\\\jerju\\\\OneDrive\\\\Focus CFO\\\\AI\\\\DNA Model\" log --oneline -15)",
+      "Bash(git -C \"C:\\\\Users\\\\jerju\\\\OneDrive\\\\Focus CFO\\\\AI\\\\DNA Model\" diff --stat HEAD)",
+      "Bash(git -C \"C:\\\\Users\\\\jerju\\\\OneDrive\\\\Focus CFO\\\\AI\\\\DNA Model\" status)",
+      "Bash(git -C \"C:\\\\Users\\\\jerju\\\\OneDrive\\\\Focus CFO\\\\AI\\\\DNA Model\" diff --stat)",
+      "Bash(git -C \"C:\\\\Users\\\\jerju\\\\OneDrive\\\\Focus CFO\\\\AI\\\\DNA Model\" log --oneline -5)"
     ]
   }
 }

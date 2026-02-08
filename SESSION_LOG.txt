@@ -300,6 +300,215 @@ ACCOMPLISHED:
 - YYYYMM helper values hidden with white font
 
 ================================================================================
+SESSION: January 16, 2026
+================================================================================
+Duration: ~1 hour
+
+VERSION: 3.1.0
+
+ACCOMPLISHED - COMPREHENSIVE FIX PASS:
+
+1. Multi-Division Dashboard Chart Sync (CRITICAL FIX)
+   - Dashboard charts now dynamically respond to division selector (C6)
+   - When "Consolidated" selected → charts show consolidated data
+   - When specific division selected → charts show that division's data
+   - Pie chart, Revenue, Net Income, and Gross Margin charts all fixed
+   - Location: _add_dashboard_charts() around line 8348
+
+2. Forecast Logic Fix (CRITICAL FIX)
+   - PROBLEM: Forecast only worked correctly for January
+   - ROOT CAUSE: Used datetime.now().month instead of data's current month
+   - FIX: Now uses months[-1][0] (the data's current period from Menu)
+   - Past months (< current): Use Actuals
+   - Current month (= current): Use Actuals
+   - Future months (> current): Use Budget + Adj
+   - Location: _create_forecast_sheet() around line 7179
+
+3. Menu Sheet Cleanup
+   - C7, C8 values right-aligned for visual consistency
+   - Hyperlinks changed to standard blue (#0000EE) for better readability
+   - Hyperlink color applied AFTER add_hyperlink() to ensure visibility
+   - Location: _create_menu_sheet() around line 5371-5435
+
+4. P&L Column Width Improvements
+   - AutoFit now uses UsedRange.Columns.AutoFit() for reliability
+   - YTD, Variance columns get minimum 12-width
+   - Full year columns ensured adequate width
+   - Location: _create_pl_report_multi_div() around line 3734
+
+5. Balance Sheet Improvements
+   - Added row grouping (matching P&L formatting)
+   - Row groups default to EXPANDED (RowLevels=2)
+   - Row 3 (YYYYMM helper) now properly hidden
+   - AutoFit improved with minimum column widths
+   - Location: _create_bs_report_multi_div() around line 4040
+
+6. Cash Flow YTD Column Width
+   - AutoFit improved with UsedRange approach
+   - YTD column gets minimum 14-width
+   - Location: _create_cash_flow() around line 6824
+
+7. Divisions 3-5 Row Grouping
+   - P&L and BS sheets for divisions 3, 4, 5 collapse row groups by default
+   - Uses ShowLevels(RowLevels=1) for collapsed state
+   - Location: _create_multi_division_model() around line 3033
+
+TECHNICAL CHANGES:
+- Version bump: 3.0.0 → 3.1.0
+- All changes made to webapp/desktop_app.py
+
+KEY CODE LOCATIONS:
+- Dashboard charts: line ~8348
+- Forecast logic: line ~7179
+- Menu sheet: line ~5371
+- P&L multi-div autofit: line ~3734
+- BS multi-div grouping: line ~4040
+- Cash Flow autofit: line ~6824
+- Division sheet collapse: line ~3033
+
+ADDITIONAL FIXES (same session):
+
+8. #REF! Errors in Division 2-5 Annual Totals (CRITICAL FIX)
+   - ROOT CAUSE: Column offset was hardcoded to +2, but multi-division mode uses +3
+   - FIX: Dynamic col_offset based on single_entity_mode (2) vs multi-div (3)
+   - Location: _create_pl_report_multi_div() line ~3512
+
+9. Dynamic Progress Bar Using Historical Timing
+   - Added StepTimer.get_historical_estimate() class method
+   - Loads timing_log.json and uses average + 10% buffer
+   - Falls back to default estimate if no history exists
+   - Both multi-division and single-entity modes now use this
+   - Location: StepTimer class line ~182, calls at lines ~2840 and ~4424
+
+10. Menu Helper Columns E-K Hidden
+    - Multi-division menu was only hiding G:K, now hides E:K
+    - Single-entity menu already hid E:K correctly
+    - Location: _create_multi_division_menu_sheet() line ~4399
+
+11. Menu Value Alignment C7-C10
+    - Multi-division menu: Right-aligned all config values in C7-C10
+    - Single-entity menu: Already had C7, C8 right-aligned
+    - Location: Multi-div menu loop line ~4223
+
+NEXT STEPS:
+1. Test dashboard chart sync with division switching
+2. Test forecast with different current months
+3. Verify all column widths display properly
+4. Confirm row groupings work correctly
+5. Verify #REF! errors are resolved in Division 2-5 P&Ls
+6. Confirm progress bar timing improves after first run
+
+--------------------------------------------------------------------------------
+CONTINUATION SESSION: January 16, 2026 (v3.1.1 Bug Fixes)
+--------------------------------------------------------------------------------
+Duration: ~30 minutes
+
+ACCOMPLISHED:
+
+1. #REF! Errors in Year Column Formulas (CRITICAL FIX)
+   - ROOT CAUSE: _remove_empty_leading_columns() deletes columns AFTER year
+     formulas are written, breaking hardcoded column references like =B6+C6+D6...
+   - FIX: Changed year column formulas to use SUMPRODUCT with row 3 YYYYMM values:
+     =SUMPRODUCT((INT(B$3:M$3/100)=2025)*B6:M6)
+   - This formula dynamically sums columns based on their YYYYMM value, surviving
+     any column insertion/deletion
+   - Fixed in both multi-division P&L (line ~3556) and single-entity P&L (line ~5831)
+
+2. Row 3 Hiding Fix (ALL SHEETS)
+   - ROOT CAUSE: Using .api.Hidden = True instead of .api.EntireRow.Hidden = True
+   - FIX: Changed all row hiding operations to use .api.EntireRow.Hidden = True
+   - Affected sheets: P&L, Balance Sheet, Cash Flow, Forecast, templates
+
+3. Menu Column Hiding Fix
+   - ROOT CAUSE: Multi-division menu has visible content in column E (source data
+     descriptions in rows 13-15) but code tried to hide E:K
+   - FIX: Changed multi-division menu to only hide F:K (not E:K)
+   - Added white font color to E7 helper value so it's invisible but column remains
+     visible for source data descriptions
+   - Changed all column hiding to use .api.EntireColumn.Hidden = True for reliability
+
+4. Version Bump and Build
+   - Updated APP_VERSION from 3.1.0 to 3.1.1
+   - Built new EXE: dist/CFO_Financial_Model_Generator_v3.1.1.exe
+
+TECHNICAL CHANGES:
+- desktop_app.py line ~3556: Year formula uses SUMPRODUCT with YYYYMM row
+- desktop_app.py line ~5831: Single-entity year formula uses SUMPRODUCT
+- desktop_app.py line ~4385: Multi-div menu hides F:K (not E:K)
+- desktop_app.py line ~4364: E7 helper value gets white font color
+- All .api.Hidden = True changed to .api.EntireRow/Column.Hidden = True
+
+KEY CODE LOCATIONS:
+- Year SUMPRODUCT formula (multi-div): line ~3556
+- Year SUMPRODUCT formula (single-entity): line ~5831
+- Multi-div menu column hiding: line ~4385
+- Row 3 hiding operations: search for "EntireRow.Hidden"
+
+NEXT STEPS:
+1. Test v3.1.1 to verify:
+   - Row 3 is properly hidden on all sheets
+   - Menu columns F-K are hidden (E visible for descriptions)
+   - Year column formulas work correctly after column removal
+   - Division 2-5 P&Ls no longer have #REF! errors in year columns
+
+--------------------------------------------------------------------------------
+SESSION: January 16, 2026 (v3.2.0 Feature Updates)
+--------------------------------------------------------------------------------
+Duration: ~45 minutes
+
+ACCOMPLISHED:
+
+1. Sheet Ordering Fix
+   - Reordered sheets: Forecast_Summary now comes BEFORE Consolidated_Forecast
+   - Division Forecast Summary sheets added after division Forecast sheets
+   - Updated both multi-division and single-entity sheet ordering
+
+2. Division-Specific Forecast Summary Sheets (NEW FEATURE)
+   - Each division now gets its own Forecast Summary sheet (e.g., "Division1_Fcst_Summary")
+   - Uses division-specific Forecast sheet for formula references
+   - Title shows division name (e.g., "Forecast Summary - Division Name - 2025")
+   - Updated _create_forecast_summary_sheet to accept optional division_name parameter
+
+3. Settings Tab (Replaces Dashboard_Control)
+   - Renamed Dashboard_Control to Settings
+   - NEW: Lists all sheet names vertically with Yes/No dropdown for visibility
+   - Created _create_settings_sheet() function with data validation dropdowns
+   - Added UpdateVisibility VBA macro to show/hide sheets based on Settings
+
+4. Orphan Sheet Cleanup
+   - Added code to delete orphan sheets in multi-division mode:
+     - Balance_Sheet (doesn't exist in multi-div mode)
+     - Consolidated_BS (doesn't exist in multi-div mode)
+     - Dashboard_Control (replaced by Settings)
+
+5. VBA Code Updates
+   - Added UpdateVisibility macro that reads Settings sheet and shows/hides sheets
+
+6. Version Bump and Build
+   - Updated APP_VERSION to 3.2.0
+   - Built new EXE: dist/CFO_Financial_Model_Generator_v3.2.0.exe
+
+TECHNICAL CHANGES:
+- desktop_app.py line ~3170: Added division Forecast Summary sheet creation
+- desktop_app.py line ~3207: Added Settings sheet creation
+- desktop_app.py line ~3223: Added orphan sheet cleanup
+- desktop_app.py line ~3240: Updated sheet_order for division Fcst_Summary sheets
+- desktop_app.py line ~4605: Updated single-entity to use Settings instead of Dashboard_Control
+- desktop_app.py line ~7489: Updated _create_forecast_summary_sheet with division_name param
+- desktop_app.py line ~8011: Added _create_settings_sheet() function
+- desktop_app.py line ~1585: Added UpdateVisibility VBA macro
+
+KEY CODE LOCATIONS:
+- Settings sheet creation: line ~8011 (_create_settings_sheet)
+- Division Forecast Summary: line ~3170
+- Orphan cleanup: line ~3223
+- UpdateVisibility VBA: line ~1585
+
+REMAINING FOR NEXT SESSION:
+1. YTD column widths still need review - user mentioned they're not sizing correctly
+   (Either too small or too wide - AutoFit may not be working as expected)
+
+================================================================================
 TEMPLATE - Copy for new sessions:
 ================================================================================
 SESSION: [DATE]
@@ -316,3 +525,615 @@ NEXT STEPS:
 -
 
 ================================================================================
+
+--------------------------------------------------------------------------------
+SESSION: January 16, 2026 (v3.2.1 Number Formatting) - Previous session
+--------------------------------------------------------------------------------
+Duration: ~20 minutes
+
+ACCOMPLISHED:
+
+1. Column Width Standardization
+   - Set all data columns to width 13 (fits "$10,000,000")
+   - AutoFit only applied to column A (account names)
+   - Removed AutoFit for data columns (was inconsistent)
+   - Applied to: P&L, BS, Cash Flow, Forecast, Forecast Summary
+
+2. Number Format Cleanup
+   - Removed cents from all dollar formats
+   - Changed '#,##0.00' to '#,##0' across all sheets
+   - Changed ratio format from '0.00' to '0.0'
+
+TECHNICAL CHANGES:
+- desktop_app.py: All column width operations now use explicit width 13
+- desktop_app.py: All number formats use #,##0 (no cents)
+
+--------------------------------------------------------------------------------
+SESSION: January 16, 2026 (v3.2.2 Validation & Performance)
+--------------------------------------------------------------------------------
+Duration: ~30 minutes
+
+ACCOMPLISHED:
+
+1. File Type Validation (NEW FEATURE)
+   - Added _detect_file_type() function that analyzes account names
+   - Uses weighted keyword scoring (P&L: income, revenue, expense, etc.)
+   - Uses weighted keyword scoring (BS: assets, liabilities, equity, etc.)
+   - Added _validate_file_type() function for validation with confidence level
+   - Updated _browse_pl() and _browse_bs() to validate file type
+   - Updated DivisionSetupDialog._browse_file() with same validation
+   - Shows error message if wrong file type uploaded (>60% confidence)
+
+2. UI Cleanup
+   - Removed Configuration frame (Fiscal Year Start, Display Month, Display Year)
+   - These settings were auto-detected from files - no longer needed
+   - Removed related variables and helper functions
+   - Reduced window height from 780 to 650
+
+3. Performance Optimization
+   - ISSUE: Column width loops were making 50-100 individual COM calls per sheet
+   - FIX: Replaced loops with bulk range operations (e.g., sheet.range('B:BZ').column_width = 13)
+   - Locations fixed:
+     - _create_consolidated_pl_report (line ~3900)
+     - _create_division_bs_report (line ~4200)
+     - _create_pl_report (line ~6400)
+     - _create_bs_report (line ~6760)
+     - _create_cash_flow (line ~7075)
+     - _create_forecast_sheet (line ~7640)
+     - _create_forecast_summary_sheet (line ~8085)
+   - Expected speedup: Significant reduction in Excel COM calls
+
+4. Version Bump
+   - Updated APP_VERSION to 3.2.2
+   - Renamed spec file to CFO_Financial_Model_Generator_v3.2.2.spec
+   - Updated version history in file header
+
+TECHNICAL CHANGES:
+- desktop_app.py: Added _detect_file_type() and _validate_file_type()
+- desktop_app.py: DivisionSetupDialog also got _detect_file_type/_validate_file_type
+- desktop_app.py: Removed config_frame, fiscal_start, display_month, display_year
+- desktop_app.py: All column width loops replaced with bulk operations
+
+KEY CODE LOCATIONS:
+- File type detection: line ~4879 (FinancialModelApp), line ~475 (DivisionSetupDialog)
+- Bulk column widths: Search for "sheet.range('B:BZ').column_width = 13"
+
+NEXT STEPS:
+1. Test v3.2.2 to verify:
+   - File type validation shows error for wrong file types
+   - UI is cleaner without Configuration section
+   - Performance is improved (should be faster for 5 divisions)
+2. Build new EXE and test with real data
+
+--------------------------------------------------------------------------------
+SESSION: January 16, 2026 (v3.2.3 Period Selector & Cleanup)
+--------------------------------------------------------------------------------
+Duration: ~30 minutes
+
+ACCOMPLISHED:
+
+1. Fixed Current Period Display Format
+   - Changed month format from "Nov 24" to "Nov 2024" (avoids date interpretation)
+   - Updated _parse_month_value() to use full 4-digit year in display names
+
+2. Added Period Dropdown to Menu Sheet
+   - C7 now has a dropdown with all available months from data
+   - Added hidden lookup table in columns K:M (Period, YYYYMM, MonthNum)
+   - G7 uses VLOOKUP formula to automatically get YYYYMM when period changes
+   - E7, F7 also use formulas to update month/year values
+   - G9 (Actuals Through) links to G7
+   - Added hint text "← Select period to view"
+
+3. Project Cleanup - Removed unnecessary files:
+   - Old spec files: v3.1.0.spec, v3.1.1.spec, v3.2.0.spec
+   - Old EXE files: v3.0.3, v3.1.0, v3.1.1, v3.2.0 (kept v3.2.1 for rollback)
+   - Legacy web app files: app.py, excel_generator.py, vba_code.bas
+   - Legacy directories: static/, templates/, uploads/
+   - Build directory (intermediate files)
+   - Misc: nul, TODO_NEXT_SESSION.txt, image.png
+
+4. Version Bump and Build
+   - Updated APP_VERSION to 3.2.3
+   - Built new EXE: dist/CFO_Financial_Model_Generator_v3.2.3.exe
+
+TECHNICAL CHANGES:
+- desktop_app.py: Changed all "year % 100" to "year" in display_name formatting
+- desktop_app.py: Added period lookup table creation to _create_multi_division_menu_sheet
+- desktop_app.py: Added period lookup table creation to _create_menu_sheet (single-entity)
+- desktop_app.py: E7, F7, G7, G9 now use VLOOKUP formulas instead of static values
+
+HOW PERIOD SELECTOR WORKS:
+1. When model is generated, a lookup table is created in hidden columns K:M
+   - K: Period display name (e.g., "Nov 2024")
+   - L: YYYYMM value (e.g., 202411)
+   - M: Month number (1-12)
+2. C7 has dropdown validation listing all available periods
+3. G7 formula: =IFERROR(VLOOKUP(C7,$K$7:$L${lastrow},2,FALSE),0)
+4. When user selects a period from dropdown:
+   - G7 automatically updates to that YYYYMM
+   - All formulas referencing Menu!G7 will show data up to that period
+   - YTD calculations adjust automatically
+
+PROJECT STRUCTURE (After Cleanup):
+webapp/
+├── CFO_Financial_Model_Generator_v3.2.3.spec
+├── consolidation_engine.py
+├── desktop_app.py
+├── dist/
+│   ├── CFO_Financial_Model_Generator_v3.2.1.exe (rollback)
+│   ├── CFO_Financial_Model_Generator_v3.2.3.exe (current)
+│   ├── DNA_Template.xlsm
+│   └── timing_log.json
+├── DNA_Template.xlsm
+├── DNA_Template_v2.xlsm
+└── mapping_persistence.py
+
+NEXT STEPS:
+1. Test v3.2.3 to verify:
+   - Period dropdown works correctly
+   - Selecting different periods updates all sheet data
+   - YTD calculations adjust to selected period
+   - Notes reflect the selected period
+
+================================================================================
+SESSION: January 16, 2026 (Afternoon - Performance Optimization)
+================================================================================
+
+ACCOMPLISHED:
+
+1. v3.2.4 Bug Fixes
+   - Fixed "data_start_month" attribute error (auto-detection now returns None)
+   - Removed account mapping dialog (auto-processes mappings)
+
+2. v3.2.5 Fixes
+   - Fixed Forecast Summary CM Actual formula column range (multi-division offset)
+   - Restored Dashboard_Control sheet creation (needed for KPI targets)
+   - Updated build date to 2026-01-16
+
+3. v3.2.6 PERFORMANCE OPTIMIZATION - Template Pre-formatting
+   - Analyzed performance bottleneck: division sheets taking 35-40s each
+   - Implemented "clone-and-inject" pattern for division sheets:
+     * Creates _TPL_PL and _TPL_BS templates ONCE at generation start
+     * Templates have all formatting pre-applied (fonts, colors, number formats)
+     * Division sheets clone templates instead of formatting from scratch
+     * Only row-type-specific formatting applied (bold for headers/totals)
+
+   New Functions Added (desktop_app.py lines 9825-10305):
+   - _create_runtime_templates(wb, months): Creates pre-formatted templates
+   - _create_division_pl_optimized(wb, div_pl, months, totals, name, after): Clone-and-inject P&L
+   - _create_division_bs_optimized(wb, div_bs, months, totals, name, after): Clone-and-inject BS
+
+   Expected Performance Improvement:
+   - Division sheet creation: 35-40s -> 10-15s each
+   - Total model generation: 40-50% faster for multi-division models
+
+   Templates are deleted after generation (not visible in final file)
+
+4. Built and Verified
+   - Created CFO_Financial_Model_Generator_v3.2.6.spec
+   - Built CFO_Financial_Model_Generator_v3.2.6.exe (94.5 MB)
+   - Removed old v3.2.5.spec file
+
+TECHNICAL CHANGES:
+- desktop_app.py: Added _create_runtime_templates() to build pre-formatted templates
+- desktop_app.py: Added _create_division_pl_optimized() and _create_division_bs_optimized()
+- desktop_app.py: Modified division loop to use optimized functions when templates created
+- desktop_app.py: Added template sheet cleanup (delete _TPL_PL, _TPL_BS after generation)
+- desktop_app.py: Updated APP_VERSION to "3.2.6"
+- desktop_app.py: Added v3.2.6 to version history
+
+TIMING EXPECTATIONS (based on analysis):
+- Best previous run: 160.68s
+- Average previous run: 317.94s
+- Expected with optimization: ~100-150s (40-50% improvement)
+
+The optimization follows the "Clone, Inject, Adjust" pattern from the Template V2
+Architecture plan. Division sheets now:
+1. Clone pre-formatted template (fast - single operation)
+2. Inject data with bulk write (already optimized)
+3. Apply only minimal row-specific formatting (headers/totals bold/borders)
+4. Delete excess placeholder rows
+
+KNOWN ISSUE - UPDATE EXISTING MODEL FUNCTION NEEDS OVERHAUL:
+The `_update_existing_model()` function (lines 2132-2425) and `_add_month_to_reports()`
+(lines 2507-2706) are designed for OLD single-entity model structure and will NOT work
+with multi-division models. Key issues:
+
+1. Source sheet structure mismatch:
+   - Code assumes: Column A = Account Name, data starts Column B
+   - Multi-div has: Column A = Division, Column B = Account, data starts Column C
+
+2. Wrong report sheet names:
+   - Code looks for 'PL', 'Balance_Sheet'
+   - Multi-div has 'Consolidated_PL', no 'Consolidated_BS', division-specific sheets
+
+3. Formula structure wrong:
+   - Uses SUMPRODUCT with single account column
+   - Multi-div uses SUMIF/SUMIFS with division filtering
+
+4. No division-specific updates:
+   - Doesn't update Division1_PL, Division1_BS, etc.
+
+5. Menu sheet issues:
+   - Sets static values in E7, F7, G7 (now VLOOKUP formulas)
+   - Doesn't update period lookup table (K:M) or C7 dropdown
+
+6. Missing: Forecast sheets, Dashboard, Forecast Summary updates
+
+ACTION REQUIRED: Complete rewrite of update function for multi-division support.
+
+NEXT STEPS:
+1. Test v3.2.6 to verify:
+   - Templates create correctly
+   - Division sheets clone and populate properly
+   - Performance improvement measured
+   - Template sheets deleted from final file
+2. If successful, consider applying same optimization to:
+   - Consolidated_PL sheet
+   - Cash_Flow sheet
+   - Forecast sheets
+3. Overhaul Update Existing Model function for multi-division support
+
+================================================================================
+SESSION: January 23, 2026 - UNIFIED UPDATE MODEL (v3.2.7 → v3.2.12)
+================================================================================
+Duration: ~3 hours
+
+ACCOMPLISHED:
+
+1. UNIFIED UPDATE MODEL ARCHITECTURE (v3.2.7 → v3.2.9)
+   - Rewrote _update_existing_model() and _add_month_to_reports() to support
+     both single-entity and multi-division models through unified code path
+   - Added auto-detection: _detect_model_type() checks Source_PL!A1 for "Division"
+   - Dynamic column structure: _get_source_structure() returns offsets by mode
+   - Dynamic report sheet discovery: _get_report_sheets() finds all PL/BS sheets
+   - New helper functions:
+     * _find_column_by_yyyymm() - finds column by YYYYMM value
+     * _update_menu_lookup_table() - adds new months to K:M lookup table
+     * _update_menu_dropdown() - updates C7 validation and VLOOKUP formulas
+     * _generate_source_formula() - generates mode-aware formulas
+
+2. DATE DETECTION & PROMPT DIALOG (v3.2.8)
+   - Added _prompt_for_date() dialog for when auto-detection fails
+   - Improved error messages to show header contents found
+   - Fallback to current date if dialog not available
+
+3. PERFORMANCE OPTIMIZATION (v3.2.9)
+   - ISSUE: Update was hanging on Step 7 with high resource usage
+   - CAUSE: Cell-by-cell formula writes in nested loops
+   - FIX: Bulk Find/Replace for formula range updates
+   - FIX: Bulk formula writes using array assignment
+   - Result: Update completes in seconds instead of hanging
+
+4. PROGRESS TRACKING UNIFIED (v3.2.11)
+   - Changed from _update_status("Step X/8:...") to update_step() system
+   - Now matches build code's progress tracking style
+   - Shows arrow-style messages: → Reading P&L file...
+   - Shows substeps: → Populating P&L source data...
+   - Shows time remaining estimates
+
+5. DASHBOARD FIXES (v3.2.10 → v3.2.12)
+   - ISSUE: Dashboard "Current Period" showed 46381 (date serial number)
+   - FIX: Changed formula to =TEXT(Menu!C7,"mmm yyyy") for proper formatting
+   - ISSUE: Company name was being overwritten
+   - FIX: Now reads and preserves existing B2 value before updates
+   - ADDED: Period selector on Dashboard (row 6) linked to Menu!C7
+   - ADDED: Dashboard activated as default sheet on open
+
+6. MENU FIXES (v3.2.12)
+   - ISSUE: C7/C9 values interpreted as dates
+   - FIX: Set number_format = '@' (text format) before setting values
+   - ADDED: C8 "Data Range" text updated with new month range
+
+7. REPORT SHEET COLUMN DETECTION FIX (v3.2.12)
+   - ISSUE: Using row 3 to find last column failed when row 3 is hidden
+   - FIX: Changed all range('B3').end('right') to range('B4').end('right')
+   - Applied to: PL sheets, BS sheets, Cash Flow sheet, YTD detection
+
+8. POST-UPDATE CLEANUP (v3.2.12) - Matching Build Code
+   - Row 3 (YYYYMM helper) hidden on all report sheets
+   - Outline groups collapsed on all report sheets
+   - Outline groups collapsed on Forecast sheet
+   - Dashboard activated as default sheet
+
+9. PROJECT CLEANUP
+   - Deleted old EXE files (v3.2.5 through v3.2.11)
+   - Deleted old spec files
+   - Cleaned build folder
+   - Only v3.2.12.exe remains
+
+TECHNICAL CHANGES:
+- desktop_app.py line ~2317: _update_existing_model() uses progress tracker
+- desktop_app.py line ~2749: _add_month_to_reports() with bulk operations
+- desktop_app.py line ~2893: Column detection uses row 4 instead of row 3
+- desktop_app.py line ~3241: Dashboard regeneration with dynamic formulas
+- desktop_app.py line ~2647: Post-update cleanup (hide row 3, collapse groups)
+
+KEY CODE LOCATIONS:
+- Model type detection: _detect_model_type() line ~2138
+- Source structure: _get_source_structure() line ~2150
+- Report sheet discovery: _get_report_sheets() line ~2161
+- Menu lookup table update: _update_menu_lookup_table() line ~2230
+- Menu dropdown update: _update_menu_dropdown() line ~2255
+- Dashboard formula regeneration: line ~3241
+- Post-update cleanup: line ~2647
+
+REMAINING ISSUES (for next session):
+1. Forecast new month column - currently only expands formula ranges,
+   should add new column with formulas like PL/BS
+2. Menu dropdown should pull ALL months from source data, not just lookup table
+3. Balance Sheet data not populating for new month (formula issue?)
+4. Need to verify all formulas use correct row 2 vs row 3 for YYYYMM
+
+VERSIONING STRATEGY:
+- Major.Minor.Patch format (e.g., 3.2.12)
+- Major: Significant architecture changes (e.g., multi-division support)
+- Minor: New features or significant improvements
+- Patch: Bug fixes and incremental improvements
+- Build each version as standalone EXE
+- Clean up old versions after testing confirms new version works
+
+FILES:
+- Current EXE: webapp/dist/CFO_Financial_Model_Generator_v3.2.13.exe
+- Main code: webapp/desktop_app.py (~11,400 lines)
+- Templates: DNA_Template.xlsm, DNA_Template_v2.xlsm
+
+--------------------------------------------------------------------------------
+CONTINUATION: January 23, 2026 (v3.2.13 - Remaining Issues Fixed)
+--------------------------------------------------------------------------------
+
+FIXES APPLIED:
+
+1. COLUMN DETECTION FIX (CRITICAL)
+   - ISSUE: Using end('right') on row 4 went to YTD/Notes columns, not last month
+   - FIX: Now scan row 3 for YYYYMM values (200000-210000 range) to find last month column
+   - Applied to: PL sheets, BS sheets, Cash Flow sheet
+   - This ensures new columns insert BEFORE YTD columns, not after
+
+2. FORECAST ACTUAL FORMULAS (CRITICAL)
+   - ISSUE: Future months had '0' in Actual column (set during build when data didn't exist)
+   - FIX: After adding new data, scan Forecast and regenerate Actual formulas for months
+     that now have Source_PL data
+   - Creates proper SUMIF formula: =IFERROR(SUMIF(Source_PL!$A$3:$A$1500,TRIM($A5),
+     Source_PL!{col}$3:{col}$1500),0)
+   - Only updates cells that currently have '0' or no formula
+
+3. MENU DROPDOWN SORTING
+   - ISSUE: Dropdown months might not be in chronological order
+   - FIX: Sort lookup table entries by YYYYMM before creating dropdown list
+   - Ensures dropdown shows months in correct order (Oct 2024, Nov 2024, Dec 2024...)
+
+TECHNICAL CHANGES (v3.2.13):
+- Line ~2953: PL column detection uses row 3 YYYYMM scan
+- Line ~3088: BS column detection uses row 3 YYYYMM scan
+- Line ~3149: CF column detection uses row 3 YYYYMM scan
+- Line ~3008: YTD detection uses row 3 YYYYMM scan
+- Line ~3225: New Forecast Actual formula regeneration code block
+- Line ~2269: Menu dropdown sorts by YYYYMM before creating list
+
+--------------------------------------------------------------------------------
+CONTINUATION: January 23, 2026 (v3.2.13 - Beta Testing Documentation)
+--------------------------------------------------------------------------------
+
+ACCOMPLISHED:
+
+1. CREATED COMPREHENSIVE USER MANUAL
+   - File: docs/CFO_Financial_Model_Generator_User_Manual.md
+   - 530+ lines of documentation covering all features
+   - Sections:
+     * Introduction with feature overview
+     * System requirements (Windows, Excel 2016+)
+     * Getting started guide with data preparation
+     * Main interface walkthrough
+     * Single entity mode step-by-step
+     * Multi-division mode with setup wizard
+     * Update existing model workflow
+     * Generated Excel workbook documentation (all sheets)
+     * Working with the output (changing periods, budgets, divisions)
+     * Troubleshooting common issues
+     * FAQ section
+     * Support contact information
+
+2. CREATED BETA TESTING GUIDE
+   - File: docs/Beta_Testing_Guide.md
+   - 500 lines of structured testing documentation
+   - Test Environment Setup checklist
+   - Section 1: Installation & Launch Tests (4 test items)
+   - Section 2: Single Entity Mode Tests (8 subsections)
+     * File selection, model generation, sheet validation
+     * Menu, P&L, Balance Sheet, Cash Flow, Dashboard, Forecast tests
+   - Section 3: Update Existing Model Tests (2 subsections)
+   - Section 4: Multi-Division Mode Tests (4 subsections)
+   - Section 5: Edge Cases & Error Handling (3 subsections)
+   - Section 6: Performance Tests with benchmarks
+   - Section 7: Feedback Questions (12 questions)
+   - Section 8: Bug Report Template
+   - Section 9: Test Sign-Off Form
+
+3. EMBEDDED HELP IN APPLICATION
+   - Added Help button next to Close button
+   - Created _show_help() method with scrollable text window
+   - Created _get_help_content() - tries to load from docs folder first
+   - Created _get_embedded_help() - fallback embedded quick reference
+   - Help window: 800x600, read-only text with scrollbar
+
+4. REBUILT APPLICATION
+   - Built v3.2.13 with Help functionality
+   - EXE includes docs folder for full manual access
+   - EXE location: dist/CFO_Financial_Model_Generator_v3.2.13.exe
+   - Size: ~90 MB
+
+TECHNICAL CHANGES:
+- Line ~1854: Added button_frame with Help and Close buttons
+- Line ~1898: Added _show_help() method (~40 lines)
+- Line ~1930: Added _get_help_content() method (~15 lines)
+- Line ~1945: Added _get_embedded_help() method (~80 lines)
+
+FILES CREATED:
+- docs/CFO_Financial_Model_Generator_User_Manual.md (comprehensive manual)
+- docs/Beta_Testing_Guide.md (testing guide with pass/fail checklists)
+
+FOR WORD/PDF VERSIONS:
+The markdown files can be converted to Word/PDF using:
+- Microsoft Word: Open .md file, Save As .docx/.pdf
+- Pandoc: pandoc docs/Manual.md -o Manual.docx
+- Online converters: markdowntoword.com, cloudconvert.com
+
+NEXT STEPS:
+1. Distribute v3.2.13 EXE and documentation to beta testers
+2. Collect feedback using testing guide
+3. Address reported issues in next version
+
+--------------------------------------------------------------------------------
+CONTINUATION: January 23, 2026 (Beta Distribution & License System)
+--------------------------------------------------------------------------------
+
+ACCOMPLISHED:
+
+1. IMPROVED HELP DIALOG
+   - Replaced plain text with professional tabbed interface
+   - 7 tabs: Getting Started, File Preparation, Single Entity, Multi-Division,
+     Update Model, Using Output, Troubleshooting
+   - Clean formatting with headers, scrollable content
+   - Modal window (900x650) centered on screen
+
+2. CREATED WORD DOCUMENTS
+   - docs/CFO_Financial_Model_Generator_User_Manual.docx
+   - docs/Beta_Testing_Guide.docx
+   - Created using python-docx library
+   - Professional formatting with tables, headers, bullet points
+
+3. REMOVED CONSOLE WINDOW
+   - Rebuilt without --console flag
+   - No terminal window appears when running EXE
+
+4. CREATED DISTRIBUTION FOLDER
+   - Location: Distribution/
+   - Contains: EXE, User_Manual.docx, Beta_Testing_Guide.docx, README.txt
+   - Ready to zip and share with testers
+
+5. IMPLEMENTED LICENSE/EXPIRATION SYSTEM
+   - Default expiration: February 23, 2026 (1 month from now)
+   - Extension code system allows extending expiration
+   - Codes are obfuscated (XOR + base36 + checksum)
+   - License stored in %APPDATA%\CFO_Financial_Model\cfo_license.dat
+   - Warning shown when 7 days or less remaining
+   - Expired dialog allows entering extension code
+
+LICENSE SYSTEM DETAILS:
+-----------------------
+Location in code: desktop_app.py lines ~94-210 (LicenseManager class)
+Secret key: 0x4F43 (do not share!)
+Default expiration: 2026-02-23 (defined in DEFAULT_EXPIRATION constant)
+
+To change default expiration:
+1. Edit DEFAULT_EXPIRATION in desktop_app.py
+2. Rebuild EXE
+
+GENERATING EXTENSION CODES:
+---------------------------
+Run: python generate_license_code.py
+
+Or manually:
+    python -c "
+    from generate_license_code import generate_code
+    print(generate_code(2026, 3, 31))  # March 31, 2026
+    "
+
+CURRENT EXTENSION CODES (as of Jan 23, 2026):
++1 month  (Feb 22, 2026):  CFO-C2MG-TL
++2 months (Mar 24, 2026):  CFO-C2MJ-RM
++3 months (Apr 23, 2026):  CFO-C2M8-4Q
++6 months (Jul 22, 2026):  CFO-C2M2-9P
+End 2026  (Dec 31, 2026):  CFO-C2LN-WU
+
+IMPORTANT: Keep generate_license_code.py private - do not distribute!
+
+FILES CREATED:
+- generate_license_code.py (code generator - KEEP PRIVATE)
+- docs/create_word_docs.py (Word document generator)
+- Distribution/README.txt (quick start for testers)
+
+PLATFORM COMPATIBILITY:
+- Windows 10/11: YES
+- Mac: NO (would need separate Mac build)
+- Linux: NO
+- Requires: Microsoft Excel 2016+ installed
+
+--------------------------------------------------------------------------------
+CONTINUATION: January 23, 2026 (Activation Splash Screen & Final Fixes)
+--------------------------------------------------------------------------------
+
+ACCOMPLISHED:
+
+1. ADDED FIRST-RUN ACTIVATION SPLASH SCREEN
+   - App now requires license code on FIRST RUN (not just when expired)
+   - Shows professional activation dialog before app opens
+   - User must enter valid code to proceed
+   - License stored in %APPDATA%\CFO_Financial_Model\cfo_license.dat
+   - Each user/machine requires separate activation (license doesn't travel with EXE)
+
+2. BUG FIX: Year Validation Range
+   - ISSUE: Production code CFO-CHIG-SC was rejected as invalid
+   - CAUSE: Year validation only allowed 2024-2030, but production code uses 2099
+   - FIX: Extended year validation range from 2024-2030 to 2024-2099
+   - Location: desktop_app.py line ~177
+
+3. CREATED LICENSE CODE DOCUMENTS
+   - LICENSE_CODES.txt - Plain text reference
+   - LICENSE_CODES.docx - Printable Word document
+   - Contains all codes including production (permanent) code
+
+LICENSE ACTIVATION FLOW:
+------------------------
+First Run:
+  1. User launches EXE
+  2. No license file exists → Activation splash screen appears
+  3. User enters code (e.g., CFO-CHIG-SC for production)
+  4. Code validated → License saved → App opens
+
+Subsequent Runs:
+  1. User launches EXE
+  2. License file exists and not expired → App opens directly
+  3. If expired → Extension dialog appears
+
+FINAL LICENSE CODES:
+--------------------
+PRODUCTION (Never Expires):
+  CFO-CHIG-SC     (Expires: Dec 31, 2099)
+
+BETA TESTING:
+  CFO-C2MG-TL     +1 month   (Feb 22, 2026)
+  CFO-C2MJ-RM     +2 months  (Mar 24, 2026)
+  CFO-C2M8-4Q     +3 months  (Apr 23, 2026)
+  CFO-C2M2-9P     +6 months  (Jul 22, 2026)
+  CFO-C2LN-WU     End 2026   (Dec 31, 2026)
+
+DISTRIBUTION FOLDER CONTENTS:
+-----------------------------
+Location: Distribution/
+  - CFO_Financial_Model_Generator_v3.2.13.exe (90 MB)
+  - User_Manual.docx
+  - Beta_Testing_Guide.docx
+  - README.txt
+
+HOW TO DISTRIBUTE:
+------------------
+1. Zip the Distribution folder
+2. Share via OneDrive/Dropbox/email
+3. Give recipient their license code separately
+4. They unzip, run EXE, enter code on first run
+
+SECURITY NOTES:
+---------------
+- Keep LICENSE_CODES.txt/docx PRIVATE
+- Keep generate_license_code.py PRIVATE
+- Each machine requires separate activation
+- EXE can be freely copied, but code required to use
+- Production users: Give CFO-CHIG-SC (permanent)
+- Beta testers: Give time-limited codes
+
+FILES IN PROJECT ROOT (Keep Private):
+- generate_license_code.py
+- LICENSE_CODES.txt
+- LICENSE_CODES.docx

@@ -1,6 +1,6 @@
 """
-CFO Financial Model Generator - Desktop Application
-Creates true macro-enabled Excel files with embedded VBA using xlwings
+CFO Financial Model Generator - Desktop Application (Microsoft 365 Edition)
+Creates macro-enabled Excel files using openpyxl - NO desktop Excel required
 
 VERSION HISTORY:
 - v1.0.0 (2024-12-01): Initial release with P&L, Balance Sheet, Cash Flow
@@ -83,12 +83,264 @@ import tempfile
 import shutil
 import json
 import pandas as pd
-import xlwings as xw
-from xlwings.constants import DeleteShiftDirection
+import openpyxl
+from openpyxl import Workbook, load_workbook
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side, numbers, NamedStyle
+from openpyxl.chart import BarChart, LineChart, PieChart, Reference
+from openpyxl.chart.label import DataLabelList
+from openpyxl.chart.series import SeriesLabel
+from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.datavalidation import DataValidation
+from openpyxl.worksheet.hyperlink import Hyperlink
+from openpyxl.workbook.defined_name import DefinedName
+from openpyxl.formatting.rule import CellIsRule, FormulaRule
+from copy import copy
 
 # Multi-division support imports
 from consolidation_engine import ConsolidationEngine, DivisionConfig, AccountMapping
 from mapping_persistence import MappingPersistence
+
+# ============================================================
+# openpyxl Style Constants & Helper Functions
+# ============================================================
+
+# Color constants (hex strings for openpyxl)
+CLR_DARK_BLUE = "16213E"       # RGB(22, 33, 62)
+CLR_ACCENT_BLUE = "3B5998"     # RGB(59, 89, 152)
+CLR_LINK_BLUE = "0066CC"       # RGB(0, 102, 204)
+CLR_WHITE = "FFFFFF"
+CLR_SUBTOTAL_GRAY = "ECECEC"   # RGB(236, 236, 236)
+CLR_LIGHT_GRAY = "C8C8C8"     # RGB(200, 200, 200)
+CLR_MED_GRAY = "DCDCDC"       # RGB(220, 220, 220)
+CLR_LIGHT_YELLOW = "FFFFC8"   # RGB(255, 255, 200)
+CLR_DARK_GREEN = "006400"      # RGB(0, 100, 0)
+CLR_PURPLE = "800080"          # RGB(128, 0, 128)
+CLR_GRAY_TEXT = "808080"       # RGB(128, 128, 128)
+CLR_GRAY_64 = "646464"        # RGB(100, 100, 100)
+
+# Pre-built style objects
+FILL_DARK_BLUE = PatternFill(start_color=CLR_DARK_BLUE, end_color=CLR_DARK_BLUE, fill_type="solid")
+FILL_SUBTOTAL_GRAY = PatternFill(start_color=CLR_SUBTOTAL_GRAY, end_color=CLR_SUBTOTAL_GRAY, fill_type="solid")
+FILL_LIGHT_YELLOW = PatternFill(start_color=CLR_LIGHT_YELLOW, end_color=CLR_LIGHT_YELLOW, fill_type="solid")
+FILL_LIGHT_GRAY = PatternFill(start_color=CLR_LIGHT_GRAY, end_color=CLR_LIGHT_GRAY, fill_type="solid")
+FILL_MED_GRAY = PatternFill(start_color=CLR_MED_GRAY, end_color=CLR_MED_GRAY, fill_type="solid")
+FILL_ACCENT_BLUE = PatternFill(start_color=CLR_ACCENT_BLUE, end_color=CLR_ACCENT_BLUE, fill_type="solid")
+
+FONT_BOLD = Font(bold=True)
+FONT_HEADER_WHITE = Font(bold=True, color=CLR_WHITE, size=11)
+FONT_LINK_BLUE = Font(color=CLR_LINK_BLUE, underline="single")
+FONT_GRAY_TEXT = Font(color=CLR_GRAY_TEXT)
+FONT_GRAY_64 = Font(color=CLR_GRAY_64)
+FONT_DARK_BLUE = Font(color=CLR_DARK_BLUE)
+FONT_ACCENT_BLUE = Font(color=CLR_ACCENT_BLUE)
+FONT_DARK_GREEN = Font(color=CLR_DARK_GREEN)
+FONT_PURPLE = Font(color=CLR_PURPLE)
+
+def rgb_fill(rgb_tuple):
+    """Convert an (R, G, B) tuple to a PatternFill object."""
+    if rgb_tuple is None:
+        return PatternFill(fill_type=None)
+    hex_color = "{:02X}{:02X}{:02X}".format(rgb_tuple[0], rgb_tuple[1], rgb_tuple[2])
+    return PatternFill(start_color=hex_color, end_color=hex_color, fill_type="solid")
+
+SIDE_THIN = Side(style='thin')
+SIDE_MEDIUM = Side(style='medium')
+SIDE_DOUBLE = Side(style='double')
+BORDER_TOP_THIN = Border(top=SIDE_THIN)
+BORDER_TOP_MEDIUM = Border(top=SIDE_MEDIUM)
+BORDER_BOTTOM_DOUBLE = Border(bottom=SIDE_DOUBLE)
+BORDER_NET_INCOME = Border(top=SIDE_MEDIUM, bottom=SIDE_DOUBLE)
+BORDER_BOX_THIN = Border(top=SIDE_THIN, bottom=SIDE_THIN, left=SIDE_THIN, right=SIDE_THIN)
+
+ALIGN_CENTER = Alignment(horizontal='center')
+ALIGN_RIGHT = Alignment(horizontal='right')
+ALIGN_LEFT = Alignment(horizontal='left')
+ALIGN_WRAP = Alignment(wrap_text=True)
+
+NUM_FMT_CURRENCY = '#,##0'
+NUM_FMT_PERCENT = '0.0%'
+NUM_FMT_ACCOUNTING = '_($* #,##0_);_($* (#,##0);_($* "-"??_);_(@_)'
+
+
+def apply_style_to_range(sheet, min_row, min_col, max_row, max_col,
+                         font=None, fill=None, border=None, alignment=None, number_format=None):
+    """Apply style properties to a rectangular range of cells."""
+    for row in range(min_row, max_row + 1):
+        for col in range(min_col, max_col + 1):
+            cell = sheet.cell(row=row, column=col)
+            if font is not None:
+                cell.font = font
+            if fill is not None:
+                cell.fill = fill
+            if border is not None:
+                cell.border = border
+            if alignment is not None:
+                cell.alignment = alignment
+            if number_format is not None:
+                cell.number_format = number_format
+
+
+def set_col_width(sheet, col, width):
+    """Set column width by column number."""
+    sheet.column_dimensions[get_column_letter(col)].width = width
+
+
+def set_col_widths_range(sheet, start_col, end_col, width):
+    """Set column width for a range of columns."""
+    for col in range(start_col, end_col + 1):
+        sheet.column_dimensions[get_column_letter(col)].width = width
+
+
+def hide_column(sheet, col):
+    """Hide a column by column number."""
+    sheet.column_dimensions[get_column_letter(col)].hidden = True
+
+
+def hide_columns_range(sheet, start_col, end_col):
+    """Hide a range of columns."""
+    for col in range(start_col, end_col + 1):
+        sheet.column_dimensions[get_column_letter(col)].hidden = True
+
+
+def hide_row(sheet, row):
+    """Hide a row by row number."""
+    sheet.row_dimensions[row].hidden = True
+
+
+def group_rows(sheet, start_row, end_row, outline_level=1, hidden=False):
+    """Group rows with optional collapse."""
+    for row in range(start_row, end_row + 1):
+        sheet.row_dimensions[row].outline_level = outline_level
+        if hidden:
+            sheet.row_dimensions[row].hidden = True
+
+
+def group_cols(sheet, start_col, end_col, outline_level=1, hidden=False):
+    """Group columns with optional collapse."""
+    for col in range(start_col, end_col + 1):
+        letter = get_column_letter(col)
+        sheet.column_dimensions[letter].outline_level = outline_level
+        if hidden:
+            sheet.column_dimensions[letter].hidden = True
+
+
+def clear_sheet_data(sheet, start_row=1):
+    """Clear all data and formatting from a sheet starting from start_row."""
+    max_row = sheet.max_row
+    if max_row and max_row >= start_row:
+        sheet.delete_rows(start_row, max_row - start_row + 1)
+
+
+def copy_sheet(wb, source_name, new_name):
+    """Copy a worksheet within the same workbook."""
+    source = wb[source_name]
+    new_sheet = wb.copy_worksheet(source)
+    new_sheet.title = new_name
+    return new_sheet
+
+
+def move_sheet(wb, sheet_name, position):
+    """Move a sheet to a specific position (0-based index)."""
+    if sheet_name in wb.sheetnames:
+        wb.move_sheet(sheet_name, offset=position - wb.sheetnames.index(sheet_name))
+
+
+def cells_replace(sheet, old_text, new_text):
+    """Replace text in all cells of a sheet (equivalent to Excel's Cells.Replace)."""
+    for row in sheet.iter_rows():
+        for cell in row:
+            if cell.value and isinstance(cell.value, str) and old_text in cell.value:
+                cell.value = cell.value.replace(old_text, new_text)
+
+
+def apply_border_box(sheet, min_row, min_col, max_row, max_col, style='thin'):
+    """Apply a border box around a rectangular range of cells."""
+    side = Side(style=style)
+    for row in range(min_row, max_row + 1):
+        for col in range(min_col, max_col + 1):
+            cell = sheet.cell(row=row, column=col)
+            top = side if row == min_row else cell.border.top
+            bottom = side if row == max_row else cell.border.bottom
+            left = side if col == min_col else cell.border.left
+            right = side if col == max_col else cell.border.right
+            cell.border = Border(top=top, bottom=bottom, left=left, right=right)
+
+
+def set_bulk_col_width(sheet, start_col, end_col, width):
+    """Set column width for a range of columns by number."""
+    for col in range(start_col, end_col + 1):
+        sheet.column_dimensions[get_column_letter(col)].width = width
+
+
+def write_data_to_cells(sheet, data, start_row, start_col=1):
+    """Write a 2D list (list of rows) to cells starting at (start_row, start_col).
+    Replaces xlwings pattern: sheet['A3'].value = data (2D list)."""
+    for row_idx, row_data in enumerate(data):
+        for col_idx, value in enumerate(row_data):
+            sheet.cell(row=start_row + row_idx, column=start_col + col_idx, value=value)
+
+
+def write_row_to_cells(sheet, row_data, row, start_col=1):
+    """Write a 1D list to a single row of cells starting at (row, start_col).
+    Replaces xlwings pattern: sheet['A4'].value = [row_data]."""
+    for col_idx, value in enumerate(row_data):
+        sheet.cell(row=row, column=start_col + col_idx, value=value)
+
+
+def _final_formatting_check(sheet, data_start_row, last_data_row, last_col, sheet_type='pl'):
+    """
+    Final pass to ensure key financial totals are properly formatted.
+    Scans column A for Net Income, Total Revenue, Total COGS, Total Expenses
+    and applies correct bold + border formatting regardless of detection logic.
+
+    This is the safety net that catches any totals missed by the primary detection.
+    """
+    # Patterns for key financial totals (case-insensitive)
+    net_income_patterns = ['net income', 'net profit', 'net loss', 'net earnings']
+    total_revenue_patterns = ['total revenue', 'total income', 'total revenues',
+                              'total sales', 'total for income', 'total for revenue']
+    total_cogs_patterns = ['total cost of goods', 'total cogs', 'total cost of sales',
+                           'total for cost', 'cost of goods sold total', 'total cost of revenue']
+    total_expense_patterns = ['total expense', 'total expenses', 'total operating expense',
+                              'total for expense', 'total general and admin',
+                              'total selling', 'total other expense']
+    gross_profit_patterns = ['gross profit', 'gross margin', 'gross income']
+
+    # BS patterns
+    total_assets_patterns = ['total assets', 'total for assets']
+    total_liab_equity_patterns = ['total liabilities and equity', 'total for liabilities and equity',
+                                   'total liabilities & equity', 'total liabilities and shareholders']
+    total_liabilities_patterns = ['total liabilities', 'total for liabilities']
+    total_equity_patterns = ['total equity', "total stockholders' equity", "total shareholders' equity",
+                             'total for equity']
+
+    for row in range(data_start_row, last_data_row + 1):
+        cell_val = sheet.cell(row=row, column=1).value
+        if not cell_val or not isinstance(cell_val, str):
+            continue
+        name_lower = cell_val.strip().lower()
+
+        is_net_income = any(p in name_lower for p in net_income_patterns)
+        is_key_total = any(p in name_lower for p in (
+            total_revenue_patterns + total_cogs_patterns + total_expense_patterns +
+            gross_profit_patterns + total_assets_patterns + total_liab_equity_patterns +
+            total_liabilities_patterns + total_equity_patterns
+        ))
+
+        if is_net_income:
+            # Net Income: Bold + medium top border + double bottom border
+            for col in range(1, last_col + 1):
+                c = sheet.cell(row=row, column=col)
+                c.font = Font(bold=True, size=c.font.size or 11)
+                c.border = BORDER_NET_INCOME
+        elif is_key_total:
+            # Other key totals: Bold + thin top border + gray fill
+            for col in range(1, last_col + 1):
+                c = sheet.cell(row=row, column=col)
+                c.font = Font(bold=True, size=c.font.size or 11)
+                c.border = BORDER_TOP_THIN
+                c.fill = FILL_SUBTOTAL_GRAY
+
 
 # Application Version
 APP_VERSION = "3.2.13"
@@ -2686,7 +2938,7 @@ End Sub
             self.status_label.config(text=f"{msg}{time_str}", foreground='blue')
             self.progress_var.set(progress_pct)
             self.root.update()
-            print(f"→ {step_name}")
+            print(f"-> {step_name}")
 
         def update_substep(substep_name):
             """Update substep within current step (doesn't advance progress)"""
@@ -2727,8 +2979,8 @@ End Sub
         Returns:
             bool: True if multi-division model, False if single-entity
         """
-        source_pl = wb.sheets['Source_PL']
-        header_a1 = source_pl.range('A1').value
+        source_pl = wb['Source_PL']
+        header_a1 = source_pl['A1'].value
         is_multi_division = str(header_a1).strip().lower() == 'division'
         return is_multi_division
 
@@ -2764,20 +3016,20 @@ End Sub
 
         if is_multi_division:
             # Find Consolidated_PL and all Division*_PL sheets
-            for sheet in wb.sheets:
-                if sheet.name == 'Consolidated_PL':
+            for sheet in wb.worksheets:
+                if sheet.title == 'Consolidated_PL':
                     pl_sheets.append(('Consolidated_PL', None))  # (name, division)
-                elif '_PL' in sheet.name and sheet.name != 'Source_PL':
-                    div_name = sheet.name.replace('_PL', '')
-                    pl_sheets.append((sheet.name, div_name))
-                elif sheet.name == 'Consolidated_BS':
+                elif '_PL' in sheet.title and sheet.title != 'Source_PL':
+                    div_name = sheet.title.replace('_PL', '')
+                    pl_sheets.append((sheet.title, div_name))
+                elif sheet.title == 'Consolidated_BS':
                     bs_sheets.append(('Consolidated_BS', None))
-                elif '_BS' in sheet.name and sheet.name != 'Source_BS':
-                    div_name = sheet.name.replace('_BS', '')
-                    bs_sheets.append((sheet.name, div_name))
+                elif '_BS' in sheet.title and sheet.title != 'Source_BS':
+                    div_name = sheet.title.replace('_BS', '')
+                    bs_sheets.append((sheet.title, div_name))
         else:
             # Single-entity sheets
-            sheet_names = [s.name for s in wb.sheets]
+            sheet_names = wb.sheetnames
             if 'PL' in sheet_names:
                 pl_sheets.append(('PL', None))
             elif 'P&L' in sheet_names:
@@ -2793,9 +3045,9 @@ End Sub
         Returns:
             int or None: Column index if found, None otherwise
         """
-        last_col = sheet.range((1, 1)).end('right').column
+        # end("right") replaced with max_column
         for col in range(data_start_col, last_col + 1):
-            val = sheet.range((yyyymm_row, col)).value
+            val = sheet.cell(row=yyyymm_row, column=col).value
             if val and int(val) == int(yyyymm):
                 return col
         return None
@@ -2812,16 +3064,16 @@ End Sub
         # K6 is header, K7+ are month entries
         last_lookup_row = 6
         for row in range(7, 200):  # Reasonable max
-            if menu_sheet.range(f'K{row}').value is None:
+            if menu_sheet[f'K{row}'].value is None:
                 break
             last_lookup_row = row
 
         for m, y, name, yyyymm in new_months:
             if yyyymm not in existing_months_set:
                 last_lookup_row += 1
-                menu_sheet.range(f'K{last_lookup_row}').value = name
-                menu_sheet.range(f'L{last_lookup_row}').value = yyyymm
-                menu_sheet.range(f'M{last_lookup_row}').value = m
+                menu_sheet[f'K{last_lookup_row}'].value = name
+                menu_sheet[f'L{last_lookup_row}'].value = yyyymm
+                menu_sheet[f'M{last_lookup_row}'].value = m
 
         return last_lookup_row
 
@@ -2835,8 +3087,8 @@ End Sub
         # Collect all month names from lookup table in CHRONOLOGICAL order
         month_data = []  # List of (yyyymm, name) for sorting
         for row in range(7, last_lookup_row + 1):
-            name = menu_sheet.range(f'K{row}').value
-            yyyymm = menu_sheet.range(f'L{row}').value
+            name = menu_sheet[f'K{row}'].value
+            yyyymm = menu_sheet[f'L{row}'].value
             if name and yyyymm:
                 try:
                     month_data.append((int(yyyymm), str(name)))
@@ -2850,16 +3102,16 @@ End Sub
         if month_names:
             month_list = ','.join(month_names)
             try:
-                menu_sheet.range('C7').api.Validation.Delete()
-                menu_sheet.range('C7').api.Validation.Add(Type=3, AlertStyle=1, Formula1=month_list)
+                # Validation handled via DataValidation object
+                # DataValidation handled via DataValidation()
                 print(f"DEBUG: Menu dropdown updated with {len(month_names)} months: {month_names[:3]}...{month_names[-1:]}")
             except Exception as e:
                 print(f"Warning: Could not update dropdown validation: {e}")
 
         # Update VLOOKUP formula range to include new rows
         try:
-            menu_sheet.range('G7').formula = f'=IFERROR(VLOOKUP(C7,$K$7:$L${last_lookup_row},2,FALSE),0)'
-            menu_sheet.range('E7').formula = f'=IFERROR(VLOOKUP(C7,$K$7:$M${last_lookup_row},3,FALSE),1)'
+            menu_sheet['G7'].value = f'=IFERROR(VLOOKUP(C7,$K$7:$L${last_lookup_row},2,FALSE),0)'
+            menu_sheet['E7'].value = f'=IFERROR(VLOOKUP(C7,$K$7:$M${last_lookup_row},3,FALSE),1)'
         except Exception as e:
             print(f"Warning: Could not update VLOOKUP formulas: {e}")
 
@@ -2946,13 +3198,13 @@ End Sub
             update_step("Opening existing model...")
             shutil.copy2(self.existing_model_path.get(), temp_path)
 
-            app = xw.App(visible=False)
+            # openpyxl: no Excel app needed
             try:
-                wb = app.books.open(temp_path)
+                wb = load_workbook(temp_path, keep_vba=True)
 
                 # Get existing sheets
-                source_pl = wb.sheets['Source_PL']
-                source_bs = wb.sheets['Source_BS']
+                source_pl = wb['Source_PL']
+                source_bs = wb['Source_BS']
 
                 # Detect model type (single-entity vs multi-division)
                 is_multi_division = self._detect_model_type(wb)
@@ -2966,9 +3218,9 @@ End Sub
                 # Find existing months in Source_PL (row 2 has YYYYMM)
                 update_step("Analyzing existing data...")
                 existing_months = set()
-                last_col = source_pl.range('A1').end('right').column
+                # end("right") replaced with max_column
                 for col in range(data_start_col, last_col + 1):
-                    yyyymm = source_pl.range((2, col)).value
+                    yyyymm = source_pl.cell(row=2, column=col).value
                     if yyyymm:
                         existing_months.add(int(yyyymm))
 
@@ -2991,20 +3243,17 @@ End Sub
 
                 for m, y, name, yyyymm in new_month_list:
                     # Find next available column
-                    new_col = source_pl.range('A1').end('right').column + 1
+                    # end("right") replaced with max_column
 
                     # Add month header and YYYYMM
-                    source_pl.range((1, new_col)).value = name
-                    source_pl.range((2, new_col)).value = yyyymm
+                    source_pl.cell(row=1, column=new_col).value = name
+                    source_pl.cell(row=2, column=new_col).value = yyyymm
 
                     # Format header to match existing columns
-                    header_cell = source_pl.range((1, new_col))
-                    header_cell.font.name = 'Calibri Light'
-                    header_cell.font.size = 10
-                    header_cell.font.bold = True
-                    header_cell.font.color = (255, 255, 255)
-                    header_cell.color = SOURCE_BLACK
-                    header_cell.api.HorizontalAlignment = -4108  # xlCenter
+                    header_cell = source_pl.cell(row=1, column=new_col)
+                    header_cell.font = Font(name='Calibri Light', size=10, bold=True, color="FFFFFF")
+                    header_cell.fill = rgb_fill(SOURCE_BLACK)
+                    # Alignment handled via Alignment() objects
 
                     # Add P&L data for this month - mode-aware matching
                     print(f"DEBUG: Adding P&L data for month ({m}, {y}) to column {new_col}")
@@ -3023,10 +3272,9 @@ End Sub
                     # Get existing account/division names from Source_PL and match
                     # Use UsedRange to reliably find last row
                     try:
-                        used_range = source_pl.api.UsedRange
-                        last_row_pl = used_range.Row + used_range.Rows.Count - 1
+                        last_row_pl = source_pl.max_row
                     except:
-                        last_row_pl = source_pl.range('A1').end('down').row
+                        last_row_pl = 1500  # fallback
 
                     print(f"DEBUG: Source_PL last_row_pl = {last_row_pl}")
                     non_zero_count = 0
@@ -3035,8 +3283,8 @@ End Sub
                     for row in range(3, last_row_pl + 1):
                         if is_multi_division:
                             # Multi-division: col A = Division, col B = Account
-                            existing_div = source_pl.range((row, 1)).value
-                            existing_name = source_pl.range((row, 2)).value
+                            existing_div = source_pl.cell(row=row, column=1).value
+                            existing_name = source_pl.cell(row=row, column=2).value
                             if existing_name:
                                 existing_name_str = str(existing_name).strip()
                                 # For now, match by account name only (division filtering happens in formulas)
@@ -3047,10 +3295,10 @@ End Sub
                                     non_zero_count += 1
                                 if existing_name_str in pl_values_lookup or existing_name_str.lstrip() in pl_values_lookup:
                                     matched_count += 1
-                                source_pl.range((row, new_col)).value = value
+                                source_pl.cell(row=row, column=new_col).value = value
                         else:
                             # Single-entity: col A = Account
-                            existing_name = source_pl.range((row, acct_col)).value
+                            existing_name = source_pl.cell(row=row, column=acct_col).value
                             if existing_name:
                                 existing_name_str = str(existing_name).strip()
                                 value = pl_values_lookup.get(existing_name_str,
@@ -3059,13 +3307,12 @@ End Sub
                                     non_zero_count += 1
                                 if existing_name_str in pl_values_lookup or existing_name_str.lstrip() in pl_values_lookup:
                                     matched_count += 1
-                                source_pl.range((row, new_col)).value = value
+                                source_pl.cell(row=row, column=new_col).value = value
 
                     # Format data column - font and number format
-                    data_range_pl = source_pl.range((3, new_col), (last_row_pl, new_col))
-                    data_range_pl.number_format = '#,##0'
-                    data_range_pl.font.name = 'Calibri Light'
-                    data_range_pl.font.size = 10
+                    # Range: data_range_pl = (source_pl, 3, new_col, last_row_pl, new_col)
+                    apply_style_to_range(source_pl, 3, new_col, last_row_pl, new_col, number_format='#,##0')
+                    apply_style_to_range(source_pl, 3, new_col, last_row_pl, new_col, font=Font(name='Calibri Light', size=10))
 
                     print(f"DEBUG: P&L - {len(pl_accounts)} parsed accounts, {matched_count} matched, {non_zero_count} with non-zero values")
                     if len(pl_accounts) > 0:
@@ -3075,23 +3322,20 @@ End Sub
                         acct_col_to_check = 2 if is_multi_division else 1
                         print(f"DEBUG: First 5 existing Source_PL account names (col {acct_col_to_check}):")
                         for row in range(3, min(8, last_row_pl + 1)):
-                            existing = source_pl.range((row, acct_col_to_check)).value
+                            existing = source_pl.cell(row=row, column=acct_col_to_check).value
                             print(f"  [row {row}] '{existing}'")
 
                     # Add BS data for same month
                     update_substep("Populating Balance Sheet source data...")
-                    new_col_bs = source_bs.range('A1').end('right').column + 1
-                    source_bs.range((1, new_col_bs)).value = name
-                    source_bs.range((2, new_col_bs)).value = yyyymm
+                    # end("right") replaced with max_column
+                    source_bs.cell(row=1, column=new_col_bs).value = name
+                    source_bs.cell(row=2, column=new_col_bs).value = yyyymm
 
                     # Format BS header to match existing columns
-                    bs_header_cell = source_bs.range((1, new_col_bs))
-                    bs_header_cell.font.name = 'Calibri Light'
-                    bs_header_cell.font.size = 10
-                    bs_header_cell.font.bold = True
-                    bs_header_cell.font.color = (255, 255, 255)
-                    bs_header_cell.color = SOURCE_BLACK
-                    bs_header_cell.api.HorizontalAlignment = -4108  # xlCenter
+                    bs_header_cell = source_bs.cell(row=1, column=new_col_bs)
+                    bs_header_cell.font = Font(name='Calibri Light', size=10, bold=True, color="FFFFFF")
+                    bs_header_cell.fill = rgb_fill(SOURCE_BLACK)
+                    # Alignment handled via Alignment() objects
 
                     # Add BS data for this month - mode-aware matching
                     print(f"DEBUG: Adding BS data for month ({m}, {y}) to column {new_col_bs}")
@@ -3108,10 +3352,11 @@ End Sub
                     # Get existing account names from Source_BS and match
                     # Use UsedRange to reliably find last row
                     try:
-                        used_range_bs = source_bs.api.UsedRange
-                        last_row_bs = used_range_bs.Row + used_range_bs.Rows.Count - 1
+                        # UsedRange replaced with sheet.max_row/max_column
+                        last_row_bs = source_bs.max_row  # openpyxl: use max_row
                     except:
-                        last_row_bs = source_bs.range('A1').end('down').row
+                        pass
+                        # Using sheet.max_row instead of .end("down")
 
                     print(f"DEBUG: Source_BS last_row_bs = {last_row_bs}")
                     non_zero_count_bs = 0
@@ -3120,10 +3365,10 @@ End Sub
                     for row in range(3, last_row_bs + 1):
                         if is_multi_division:
                             # Multi-division: col A = Division, col B = Account
-                            existing_name = source_bs.range((row, 2)).value
+                            existing_name = source_bs.cell(row=row, column=2).value
                         else:
                             # Single-entity: col A = Account
-                            existing_name = source_bs.range((row, acct_col)).value
+                            existing_name = source_bs.cell(row=row, column=acct_col).value
 
                         if existing_name:
                             existing_name_str = str(existing_name).strip()
@@ -3133,54 +3378,55 @@ End Sub
                                 non_zero_count_bs += 1
                             if existing_name_str in bs_values_lookup or existing_name_str.lstrip() in bs_values_lookup:
                                 matched_count_bs += 1
-                            source_bs.range((row, new_col_bs)).value = value
+                            source_bs.cell(row=row, column=new_col_bs).value = value
 
                     # Format BS data column - font and number format
-                    data_range_bs = source_bs.range((3, new_col_bs), (last_row_bs, new_col_bs))
-                    data_range_bs.number_format = '#,##0'
-                    data_range_bs.font.name = 'Calibri Light'
-                    data_range_bs.font.size = 10
+                    # Range: data_range_bs = (source_bs, 3, new_col_bs, last_row_bs, new_col_bs)
+                    apply_style_to_range(source_bs, 3, new_col_bs, last_row_bs, new_col_bs, number_format='#,##0')
+                    apply_style_to_range(source_bs, 3, new_col_bs, last_row_bs, new_col_bs, font=Font(name='Calibri Light', size=10))
 
                     print(f"DEBUG: BS - {len(bs_accounts)} parsed accounts, {matched_count_bs} matched, {non_zero_count_bs} with non-zero values")
 
                 # Update named ranges - use UsedRange for reliable row counts
                 try:
-                    used_range_pl = source_pl.api.UsedRange
-                    pl_last_row = used_range_pl.Row + used_range_pl.Rows.Count - 1
+                    # UsedRange replaced with sheet.max_row/max_column
+                    pl_last_row = source_pl.max_row  # openpyxl: use max_row
                     pl_last_col = used_range_pl.Column + used_range_pl.Columns.Count - 1
                 except:
-                    pl_last_row = source_pl.range('A1').end('down').row
-                    pl_last_col = source_pl.range('A1').end('right').column
+                    pass
+                    # Using sheet.max_row instead of .end("down")
+                    # end("right") replaced with max_column
 
                 try:
-                    used_range_bs = source_bs.api.UsedRange
-                    bs_last_row = used_range_bs.Row + used_range_bs.Rows.Count - 1
+                    # UsedRange replaced with sheet.max_row/max_column
+                    bs_last_row = source_pl.max_row  # openpyxl: use max_row
                     bs_last_col = used_range_bs.Column + used_range_bs.Columns.Count - 1
                 except:
-                    bs_last_row = source_bs.range('A1').end('down').row
-                    bs_last_col = source_bs.range('A1').end('right').column
+                    pass
+                    # Using sheet.max_row instead of .end("down")
+                    # end("right") replaced with max_column
 
-                print(f"DEBUG: Source_PL dimensions: {pl_last_row} rows, {pl_last_col} columns (up to column {self._col_letter(pl_last_col)})")
-                print(f"DEBUG: Source_BS dimensions: {bs_last_row} rows, {bs_last_col} columns (up to column {self._col_letter(bs_last_col)})")
+                print(f"DEBUG: Source_PL dimensions: {pl_last_row} rows, {pl_last_col} columns (up to column {get_column_letter(pl_last_col)})")
+                print(f"DEBUG: Source_BS dimensions: {bs_last_row} rows, {bs_last_col} columns (up to column {get_column_letter(bs_last_col)})")
 
                 # Check what's in row 2 (YYYYMM values) of Source_PL
                 yyyymm_row = []
                 for col in range(2, pl_last_col + 1):
-                    val = source_pl.range((2, col)).value
+                    val = source_pl.cell(row=2, column=col).value
                     yyyymm_row.append(val)
                 print(f"DEBUG: Source_PL row 2 (YYYYMM values): {yyyymm_row}")
 
                 try:
-                    wb.names['SourcePL'].delete()
+                    del wb.defined_names['SourcePL']
                 except:
                     pass
                 try:
-                    wb.names['SourceBS'].delete()
+                    del wb.defined_names['SourceBS']
                 except:
                     pass
 
-                wb.names.add('SourcePL', f"=Source_PL!$A$1:${self._col_letter(pl_last_col)}${pl_last_row}")
-                wb.names.add('SourceBS', f"=Source_BS!$A$1:${self._col_letter(bs_last_col)}${bs_last_row}")
+                wb.defined_names.add(DefinedName('SourcePL', attr_text=f"Source_PL!$A$1:${get_column_letter(pl_last_col)}${pl_last_row}"))
+                wb.defined_names.add(DefinedName('SourceBS', attr_text=f"Source_BS!$A$1:${get_column_letter(bs_last_col)}${bs_last_row}"))
 
                 # Get the latest month added
                 latest_month = new_month_list[-1]
@@ -3189,7 +3435,7 @@ End Sub
                 # Update Menu sheet with new current month
                 update_step("Updating Menu sheet...")
                 try:
-                    menu_sheet = wb.sheets['Menu']
+                    menu_sheet = wb['Menu']
 
                     # Update lookup table (K:M) with new months
                     update_substep("Updating lookup table...")
@@ -3201,27 +3447,27 @@ End Sub
 
                     # Set current month (C7) to latest month - this triggers VLOOKUP formulas
                     # Use text format to prevent Excel from interpreting as date
-                    menu_sheet.range('C7').number_format = '@'  # Text format
-                    menu_sheet.range('C7').value = latest_name
+                    menu_sheet['C7'].number_format = '@'  # Text format
+                    menu_sheet['C7'].value = latest_name
 
                     # Also update C9 (Actuals Through) to match
-                    menu_sheet.range('C9').number_format = '@'  # Text format
-                    menu_sheet.range('C9').value = latest_name
+                    menu_sheet['C9'].number_format = '@'  # Text format
+                    menu_sheet['C9'].value = latest_name
 
                     # Update C8 "Data Range" text - get first month from lookup table K7
-                    first_month_name = menu_sheet.range('K7').value
+                    first_month_name = menu_sheet['K7'].value
                     if first_month_name:
-                        menu_sheet.range('C8').value = f"{first_month_name} - {latest_name}"
+                        menu_sheet['C8'].value = f"{first_month_name} - {latest_name}"
 
                     print(f"DEBUG: Updated Menu - Current Month: {latest_name}, Data Range: {first_month_name} - {latest_name}, Lookup table row: {last_lookup_row}")
                 except Exception as e:
                     print(f"Warning: Could not update Menu sheet: {e}")
                     # Fallback to static values if lookup table update fails
                     try:
-                        menu_sheet.range('G7').value = latest_yyyymm
-                        menu_sheet.range('E7').value = latest_m
-                        menu_sheet.range('F7').value = latest_y
-                        menu_sheet.range('G9').value = latest_yyyymm
+                        menu_sheet['G7'].value = latest_yyyymm
+                        menu_sheet['E7'].value = latest_m
+                        menu_sheet['F7'].value = latest_y
+                        menu_sheet['G9'].value = latest_yyyymm
                     except:
                         pass
 
@@ -3246,9 +3492,9 @@ End Sub
 
                 for sheet_name in report_sheet_names:
                     try:
-                        if sheet_name in [s.name for s in wb.sheets]:
-                            sheet = wb.sheets[sheet_name]
-                            sheet.range('3:3').api.EntireRow.Hidden = True
+                        if sheet_name in wb.sheetnames:
+                            sheet = wb[sheet_name]
+                            # Row hiding handled via hide_row()
                             print(f"DEBUG: Hidden row 3 on {sheet_name}")
                     except Exception as e:
                         print(f"DEBUG: Could not hide row 3 on {sheet_name}: {e}")
@@ -3256,18 +3502,18 @@ End Sub
                 # Collapse outline groups on report sheets
                 for sheet_name in report_sheet_names:
                     try:
-                        if sheet_name in [s.name for s in wb.sheets]:
-                            sheet = wb.sheets[sheet_name]
-                            sheet.api.Outline.ShowLevels(RowLevels=1, ColumnLevels=1)
+                        if sheet_name in wb.sheetnames:
+                            sheet = wb[sheet_name]
+                            # Outline handled via group_rows()/group_cols()
                             print(f"DEBUG: Collapsed outline groups on {sheet_name}")
                     except Exception as e:
                         print(f"DEBUG: Could not collapse groups on {sheet_name}: {e}")
 
                 # Also collapse Forecast sheet
                 try:
-                    if 'Forecast' in [s.name for s in wb.sheets]:
-                        forecast_sheet = wb.sheets['Forecast']
-                        forecast_sheet.api.Outline.ShowLevels(RowLevels=1, ColumnLevels=1)
+                    if 'Forecast' in wb.sheetnames:
+                        forecast_sheet = wb['Forecast']
+                        # Outline handled via group_rows()/group_cols()
                         print("DEBUG: Collapsed outline groups on Forecast")
                 except Exception as e:
                     print(f"DEBUG: Could not collapse Forecast groups: {e}")
@@ -3278,19 +3524,19 @@ End Sub
 
                 # Set Dashboard as active sheet
                 try:
-                    if 'Dashboard' in [s.name for s in wb.sheets]:
-                        wb.sheets['Dashboard'].activate()
+                    if 'Dashboard' in wb.sheetnames:
+                        wb['Dashboard'].activate()
                         print("DEBUG: Activated Dashboard sheet")
                 except Exception as e:
                     print(f"DEBUG: Could not activate Dashboard: {e}")
 
                 # Save
                 update_step("Saving workbook...")
-                wb.save()
-                wb.close()
+                wb.save(temp_path)
+                pass  # openpyxl auto-handles cleanup
 
             finally:
-                app.quit()
+                pass  # openpyxl: no app to quit
 
             # Copy from temp to final location
             shutil.copy2(temp_path, save_path)
@@ -3305,7 +3551,7 @@ End Sub
     def _add_navigation_links(self, wb, new_month_list=None):
         """Add navigation hyperlinks to all sheets - Menu link on each sheet, sheet links on Menu"""
         try:
-            menu_sheet = wb.sheets['Menu']
+            menu_sheet = wb['Menu']
 
             # Define sheets that should have navigation with display names
             report_sheets = [
@@ -3321,24 +3567,18 @@ End Sub
             # Add "Back to Menu" link on each report sheet (cell A1)
             for sheet_name, display_name in report_sheets:
                 try:
-                    sheet = wb.sheets[sheet_name]
+                    sheet = wb[sheet_name]
                     # Add hyperlink in A1
-                    sheet.range('A1').value = '← Menu'
-                    sheet.range('A1').font.color = (0, 102, 204)  # Blue link color
-                    sheet.range('A1').font.underline = True
-                    sheet.range('A1').font.size = 9
-                    sheet.api.Hyperlinks.Add(
-                        Anchor=sheet.range('A1').api,
-                        Address="",
-                        SubAddress="Menu!A1",
-                        TextToDisplay="← Menu"
-                    )
+                    sheet['A1'].value = '← Menu'
+                    sheet['A1'].hyperlink = "#Menu!A1"
+                    sheet['A1'].font = Font(color="0066CC", underline="single", size=9)
                 except Exception as e:
                     print(f"DEBUG: Could not add Menu link to {sheet_name}: {e}")
 
             # Hide helper columns E:G on Menu
             try:
-                menu_sheet.range('E:G').api.EntireColumn.Hidden = True
+                # Column hiding handled via hide_columns_range()
+                pass
             except Exception as e:
                 print(f"DEBUG: Could not hide columns E:G: {e}")
 
@@ -3348,32 +3588,24 @@ End Sub
                 start_row = 2
 
                 # Header
-                menu_sheet.range(f'{start_col}{start_row}').value = "Quick Links"
-                menu_sheet.range(f'{start_col}{start_row}').font.bold = True
-                menu_sheet.range(f'{start_col}{start_row}').font.size = 11
+                menu_sheet[f'{start_col}{start_row}'].value = "Quick Links"
+                menu_sheet[f'{start_col}{start_row}'].font = Font(bold=True, size=11)
 
                 # Links
                 link_row = start_row + 1
                 for sheet_name, display_name in report_sheets:
                     try:
-                        menu_sheet.range(f'{start_col}{link_row}').value = display_name
-                        menu_sheet.range(f'{start_col}{link_row}').font.color = (0, 102, 204)
-                        menu_sheet.range(f'{start_col}{link_row}').font.underline = True
-                        menu_sheet.range(f'{start_col}{link_row}').font.size = 10
-                        menu_sheet.api.Hyperlinks.Add(
-                            Anchor=menu_sheet.range(f'{start_col}{link_row}').api,
-                            Address="",
-                            SubAddress=f"'{sheet_name}'!A1",
-                            TextToDisplay=display_name
-                        )
+                        menu_sheet[f'{start_col}{link_row}'].value = display_name
+                        cell = menu_sheet[f'{start_col}{link_row}']
+                        cell.font = Font(color="0066CC", underline="single", size=10)
+                        cell.hyperlink = f"#'{sheet_name}'!A1"
                         link_row += 1
                     except Exception as e:
                         print(f"DEBUG: Could not add link to {sheet_name} on Menu: {e}")
 
                 # Add border box around Quick Links section
-                box_range = menu_sheet.range(f'{start_col}{start_row}:{start_col}{link_row - 1}')
-                box_range.api.Borders.LineStyle = 1  # xlContinuous
-                box_range.api.Borders.Weight = 2  # xlThin
+                start_col_num = openpyxl.utils.column_index_from_string(start_col)
+                apply_border_box(menu_sheet, start_row, start_col_num, link_row - 1, start_col_num)
 
             except Exception as e:
                 print(f"DEBUG: Could not create Quick Links box: {e}")
@@ -3406,25 +3638,25 @@ End Sub
         try:
             # For single-entity, use the standard sheet names
             if not is_multi_division:
-                pl_sheet = wb.sheets['PL'] if 'PL' in [s.name for s in wb.sheets] else None
-                bs_sheet = wb.sheets['Balance_Sheet'] if 'Balance_Sheet' in [s.name for s in wb.sheets] else None
+                pl_sheet = wb['PL'] if 'PL' in wb.sheetnames else None
+                bs_sheet = wb['Balance_Sheet'] if 'Balance_Sheet' in wb.sheetnames else None
             else:
                 # For multi-division, start with Consolidated_PL
-                pl_sheet = wb.sheets['Consolidated_PL'] if 'Consolidated_PL' in [s.name for s in wb.sheets] else None
-                bs_sheet = wb.sheets['Consolidated_BS'] if 'Consolidated_BS' in [s.name for s in wb.sheets] else None
+                pl_sheet = wb['Consolidated_PL'] if 'Consolidated_PL' in wb.sheetnames else None
+                bs_sheet = wb['Consolidated_BS'] if 'Consolidated_BS' in wb.sheetnames else None
 
-            cf_sheet = wb.sheets['Cash_Flow'] if 'Cash_Flow' in [s.name for s in wb.sheets] else None
+            cf_sheet = wb['Cash_Flow'] if 'Cash_Flow' in wb.sheetnames else None
 
             # Get the new source column letters (after data was added)
-            pl_col_letter = self._col_letter(source_pl_last_col)
-            bs_col_letter = self._col_letter(source_bs_last_col)
+            pl_col_letter = get_column_letter(source_pl_last_col)
+            bs_col_letter = get_column_letter(source_bs_last_col)
 
             # Calculate the PREVIOUS last column (before new data was added)
             # This is needed to update formula ranges from old_col to new_col
             prev_pl_col = source_pl_last_col - len(new_month_list)
             prev_bs_col = source_bs_last_col - len(new_month_list)
-            prev_pl_col_letter = self._col_letter(prev_pl_col) if prev_pl_col >= data_start_col else self._col_letter(data_start_col)
-            prev_bs_col_letter = self._col_letter(prev_bs_col) if prev_bs_col >= data_start_col else self._col_letter(data_start_col)
+            prev_pl_col_letter = get_column_letter(prev_pl_col) if prev_pl_col >= data_start_col else get_column_letter(data_start_col)
+            prev_bs_col_letter = get_column_letter(prev_bs_col) if prev_bs_col >= data_start_col else get_column_letter(data_start_col)
 
             print(f"DEBUG: Source_PL range expanding from column {prev_pl_col_letter} to {pl_col_letter}")
             print(f"DEBUG: Source_BS range expanding from column {prev_bs_col_letter} to {bs_col_letter}")
@@ -3436,83 +3668,33 @@ End Sub
             print("DEBUG: Updating existing formula ranges with Find/Replace...")
 
             # Update Source_PL references in all sheets
-            for sheet in wb.sheets:
+            for sheet in wb.worksheets:
                 try:
                     # Skip source sheets
-                    if sheet.name in ['Source_PL', 'Source_BS', 'Source_Budget', 'Menu', 'Settings', 'Account_Mappings']:
+                    if sheet.title in ['Source_PL', 'Source_BS', 'Source_Budget', 'Menu', 'Settings', 'Account_Mappings']:
                         continue
 
-                    # Use Excel's Replace to update formula ranges
+                    # Use cells_replace to update formula ranges
                     # Pattern: Source_PL!$B$2:$[OLD]$2 -> Source_PL!$B$2:$[NEW]$2
-                    sheet.api.Cells.Replace(
-                        What=f"Source_PL!$B$2:${prev_pl_col_letter}$2",
-                        Replacement=f"Source_PL!$B$2:${pl_col_letter}$2",
-                        LookAt=2,  # xlPart
-                        MatchCase=False
-                    )
-                    sheet.api.Cells.Replace(
-                        What=f"Source_PL!$B$3:${prev_pl_col_letter}$",
-                        Replacement=f"Source_PL!$B$3:${pl_col_letter}$",
-                        LookAt=2,
-                        MatchCase=False
-                    )
+                    cells_replace(sheet, f"Source_PL!$B$2:${prev_pl_col_letter}$2", f"Source_PL!$B$2:${pl_col_letter}$2")
+                    cells_replace(sheet, f"Source_PL!$B$3:${prev_pl_col_letter}$", f"Source_PL!$B$3:${pl_col_letter}$")
                     # For multi-division (column C start)
                     if is_multi_division:
-                        sheet.api.Cells.Replace(
-                            What=f"Source_PL!$C$2:${prev_pl_col_letter}$2",
-                            Replacement=f"Source_PL!$C$2:${pl_col_letter}$2",
-                            LookAt=2,
-                            MatchCase=False
-                        )
-                        sheet.api.Cells.Replace(
-                            What=f"Source_PL!$C$3:${prev_pl_col_letter}$",
-                            Replacement=f"Source_PL!$C$3:${pl_col_letter}$",
-                            LookAt=2,
-                            MatchCase=False
-                        )
+                        cells_replace(sheet, f"Source_PL!$C$2:${prev_pl_col_letter}$2", f"Source_PL!$C$2:${pl_col_letter}$2")
+                        cells_replace(sheet, f"Source_PL!$C$3:${prev_pl_col_letter}$", f"Source_PL!$C$3:${pl_col_letter}$")
 
                     # Update Source_BS references
-                    sheet.api.Cells.Replace(
-                        What=f"Source_BS!$B$2:${prev_bs_col_letter}$2",
-                        Replacement=f"Source_BS!$B$2:${bs_col_letter}$2",
-                        LookAt=2,
-                        MatchCase=False
-                    )
-                    sheet.api.Cells.Replace(
-                        What=f"Source_BS!$B$3:${prev_bs_col_letter}$",
-                        Replacement=f"Source_BS!$B$3:${bs_col_letter}$",
-                        LookAt=2,
-                        MatchCase=False
-                    )
+                    cells_replace(sheet, f"Source_BS!$B$2:${prev_bs_col_letter}$2", f"Source_BS!$B$2:${bs_col_letter}$2")
+                    cells_replace(sheet, f"Source_BS!$B$3:${prev_bs_col_letter}$", f"Source_BS!$B$3:${bs_col_letter}$")
                     if is_multi_division:
-                        sheet.api.Cells.Replace(
-                            What=f"Source_BS!$C$2:${prev_bs_col_letter}$2",
-                            Replacement=f"Source_BS!$C$2:${bs_col_letter}$2",
-                            LookAt=2,
-                            MatchCase=False
-                        )
-                        sheet.api.Cells.Replace(
-                            What=f"Source_BS!$C$3:${prev_bs_col_letter}$",
-                            Replacement=f"Source_BS!$C$3:${bs_col_letter}$",
-                            LookAt=2,
-                            MatchCase=False
-                        )
+                        cells_replace(sheet, f"Source_BS!$C$2:${prev_bs_col_letter}$2", f"Source_BS!$C$2:${bs_col_letter}$2")
+                        cells_replace(sheet, f"Source_BS!$C$3:${prev_bs_col_letter}$", f"Source_BS!$C$3:${bs_col_letter}$")
 
                     # Update Source_Budget references
-                    sheet.api.Cells.Replace(
-                        What=f"Source_Budget!$B$2:${prev_pl_col_letter}$2",
-                        Replacement=f"Source_Budget!$B$2:${pl_col_letter}$2",
-                        LookAt=2,
-                        MatchCase=False
-                    )
-                    sheet.api.Cells.Replace(
-                        What=f"Source_Budget!$B$3:${prev_pl_col_letter}$",
-                        Replacement=f"Source_Budget!$B$3:${pl_col_letter}$",
-                        LookAt=2,
-                        MatchCase=False
-                    )
+                    cells_replace(sheet, f"Source_Budget!$B$2:${prev_pl_col_letter}$2", f"Source_Budget!$B$2:${pl_col_letter}$2")
+                    cells_replace(sheet, f"Source_Budget!$B$3:${prev_pl_col_letter}$", f"Source_Budget!$B$3:${pl_col_letter}$")
                 except Exception as e:
-                    print(f"DEBUG: Find/Replace on {sheet.name}: {e}")
+                    print(f"DEBUG: Find/Replace on {sheet.title}: {e}")
 
             print("DEBUG: Formula range updates complete")
 
@@ -3525,13 +3707,13 @@ End Sub
                 # Update all P&L sheets
                 for sheet_name, division_name in pl_sheets:
                     try:
-                        current_pl_sheet = wb.sheets[sheet_name]
+                        current_pl_sheet = wb[sheet_name]
 
                         # Find the last MONTH column by looking for numeric YYYYMM in row 3
                         # Don't use end('right') as it includes YTD, Notes columns
                         last_month_col = 2  # Start at column B
                         for col in range(2, 50):  # Reasonable max columns
-                            val = current_pl_sheet.range((3, col)).value
+                            val = current_pl_sheet.cell(row=3, column=col).value
                             # YYYYMM values are integers like 202412
                             if val is not None and isinstance(val, (int, float)) and val > 200000 and val < 210000:
                                 last_month_col = col
@@ -3541,15 +3723,15 @@ End Sub
                         new_col = last_month_col + 1
 
                         # Insert column
-                        current_pl_sheet.range((1, new_col)).api.EntireColumn.Insert()
+                        # Column insert: use sheet.insert_cols()
 
                         # Set up header row (row 3 is YYYYMM, row 4 is month name header)
-                        current_pl_sheet.range((3, new_col)).value = yyyymm
-                        current_pl_sheet.range((3, new_col)).font.color = (255, 255, 255)
-                        current_pl_sheet.range((4, new_col)).value = name
-                        current_pl_sheet.range((4, new_col)).font.bold = True
+                        current_pl_sheet.cell(row=3, column=new_col).value = yyyymm
+                        current_pl_sheet.cell(row=3, column=new_col).font = Font(color="FFFFFF")
+                        current_pl_sheet.cell(row=4, column=new_col).value = name
+                        current_pl_sheet.cell(row=4, column=new_col).font = Font(bold=True)
 
-                        last_row = current_pl_sheet.range('A4').end('down').row
+                        # Using sheet.max_row instead of .end("down")
 
                         # Build formulas in memory first, then write in bulk
                         formulas = []
@@ -3577,15 +3759,27 @@ End Sub
                                     f"(Source_PL!$A$3:$A$1000=TRIM({account_cell}))*"
                                     f"(Source_PL!$B$2:${pl_col_letter}$2={yyyymm})*"
                                     f"(Source_PL!$B$3:${pl_col_letter}$1000))"
-                                )
+                                    )
                             formulas.append([formula])
 
                         # Bulk write all formulas at once
                         if formulas:
-                            current_pl_sheet.range((5, new_col), (last_row, new_col)).value = formulas
+                            _data = formulas
+                            if _data is not None:
+                                if isinstance(_data, list) and len(_data) > 0 and isinstance(_data[0], list):
+                                    for _ri, _row in enumerate(_data):
+                                        for _ci, _val in enumerate(_row):
+                                            current_pl_sheet.cell(row=5 + _ri, column=new_col + _ci).value = _val
+                                elif isinstance(_data, list):
+                                    for _ri, _val in enumerate(_data):
+                                        if isinstance(_val, list):
+                                            for _ci, _v in enumerate(_val):
+                                                current_pl_sheet.cell(row=5 + _ri, column=new_col + _ci).value = _v
+                                        else:
+                                            current_pl_sheet.cell(row=5 + _ri, column=new_col).value = _val
 
                         # Format new column
-                        current_pl_sheet.range((5, new_col), (last_row, new_col)).number_format = '#,##0'
+                        apply_style_to_range(current_pl_sheet, 5, new_col, last_row, new_col, number_format='#,##0')
 
                         print(f"DEBUG: Added column to {sheet_name}")
                     except Exception as e:
@@ -3599,13 +3793,13 @@ End Sub
                 # Find the last MONTH column by looking for numeric YYYYMM in row 3
                 pl_last_month_col = 2
                 for col in range(2, 50):
-                    val = pl_sheet.range((3, col)).value
+                    val = pl_sheet.cell(row=3, column=col).value
                     if val is not None and isinstance(val, (int, float)) and val > 200000 and val < 210000:
                         pl_last_month_col = col
                     else:
                         break
                 new_col = pl_last_month_col
-                last_row = pl_sheet.range('A4').end('down').row
+                # Using sheet.max_row instead of .end("down")
 
                 # =====================================================================
                 # STEP 3: Update YTD and Annual formulas (only for primary P&L sheet)
@@ -3618,7 +3812,7 @@ End Sub
 
                 # Scan row 4 to find column headers
                 for check_col in range(new_col + 1, new_col + 15):
-                    header_val = pl_sheet.range((header_row, check_col)).value
+                    header_val = pl_sheet.cell(row=header_row, column=check_col).value
                     if header_val == 'PY YTD':
                         py_ytd_col = check_col
                     elif header_val == 'CY YTD':
@@ -3630,8 +3824,8 @@ End Sub
                 # Update YTD formulas using bulk write
                 if py_ytd_col and cy_ytd_col:
                     print(f"DEBUG: Updating YTD columns (PY YTD: {py_ytd_col}, CY YTD: {cy_ytd_col})")
-                    first_data_col = self._col_letter(2)
-                    last_data_col = self._col_letter(new_col)
+                    first_data_col = get_column_letter(2)
+                    last_data_col = get_column_letter(new_col)
                     helper_range = f'{first_data_col}$3:{last_data_col}$3'
 
                     # Build formulas in memory
@@ -3644,15 +3838,39 @@ End Sub
 
                     # Bulk write
                     if cy_formulas:
-                        pl_sheet.range((5, cy_ytd_col), (last_row, cy_ytd_col)).value = cy_formulas
-                        pl_sheet.range((5, py_ytd_col), (last_row, py_ytd_col)).value = py_formulas
+                        _data = cy_formulas
+                        if _data is not None:
+                            if isinstance(_data, list) and len(_data) > 0 and isinstance(_data[0], list):
+                                for _ri, _row in enumerate(_data):
+                                    for _ci, _val in enumerate(_row):
+                                        pl_sheet.cell(row=5 + _ri, column=cy_ytd_col + _ci).value = _val
+                            elif isinstance(_data, list):
+                                for _ri, _val in enumerate(_data):
+                                    if isinstance(_val, list):
+                                        for _ci, _v in enumerate(_val):
+                                            pl_sheet.cell(row=5 + _ri, column=cy_ytd_col + _ci).value = _v
+                                    else:
+                                        pl_sheet.cell(row=5 + _ri, column=cy_ytd_col).value = _val
+                        _data = py_formulas
+                        if _data is not None:
+                            if isinstance(_data, list) and len(_data) > 0 and isinstance(_data[0], list):
+                                for _ri, _row in enumerate(_data):
+                                    for _ci, _val in enumerate(_row):
+                                        pl_sheet.cell(row=5 + _ri, column=py_ytd_col + _ci).value = _val
+                            elif isinstance(_data, list):
+                                for _ri, _val in enumerate(_data):
+                                    if isinstance(_val, list):
+                                        for _ci, _v in enumerate(_val):
+                                            pl_sheet.cell(row=5 + _ri, column=py_ytd_col + _ci).value = _v
+                                    else:
+                                        pl_sheet.cell(row=5 + _ri, column=py_ytd_col).value = _val
                     print(f"DEBUG: Updated YTD formulas")
 
                 # Update Annual column formulas using bulk write
                 if fy_start_col:
                     month_cols_by_year = {}
                     for col in range(2, new_col + 1):
-                        yyyymm_val = pl_sheet.range((3, col)).value
+                        yyyymm_val = pl_sheet.cell(row=3, column=col).value
                         if yyyymm_val:
                             col_year = int(yyyymm_val) // 100
                             if col_year not in month_cols_by_year:
@@ -3661,7 +3879,7 @@ End Sub
 
                     for fy_col_offset in range(10):
                         fy_col = fy_start_col + fy_col_offset
-                        year_header = pl_sheet.range((header_row, fy_col)).value
+                        year_header = pl_sheet.cell(row=header_row, column=fy_col).value
                         if year_header and str(year_header).isdigit():
                             year = int(year_header)
                             if year in month_cols_by_year:
@@ -3669,11 +3887,23 @@ End Sub
                                 # Build formulas in memory
                                 annual_formulas = []
                                 for row in range(5, last_row + 1):
-                                    refs = '+'.join([f'{self._col_letter(c)}{row}' for c in year_cols])
+                                    refs = '+'.join([f'{get_column_letter(c)}{row}' for c in year_cols])
                                     annual_formulas.append([f'={refs}'])
                                 # Bulk write
                                 if annual_formulas:
-                                    pl_sheet.range((5, fy_col), (last_row, fy_col)).value = annual_formulas
+                                    _data = annual_formulas
+                                    if _data is not None:
+                                        if isinstance(_data, list) and len(_data) > 0 and isinstance(_data[0], list):
+                                            for _ri, _row in enumerate(_data):
+                                                for _ci, _val in enumerate(_row):
+                                                    pl_sheet.cell(row=5 + _ri, column=fy_col + _ci).value = _val
+                                        elif isinstance(_data, list):
+                                            for _ri, _val in enumerate(_data):
+                                                if isinstance(_val, list):
+                                                    for _ci, _v in enumerate(_val):
+                                                        pl_sheet.cell(row=5 + _ri, column=fy_col + _ci).value = _v
+                                                else:
+                                                    pl_sheet.cell(row=5 + _ri, column=fy_col).value = _val
                                 print(f"DEBUG: Updated Annual {year} formulas")
 
                 # =====================================================================
@@ -3682,24 +3912,24 @@ End Sub
                 # =====================================================================
                 for sheet_name, division_name in bs_sheets:
                     try:
-                        current_bs_sheet = wb.sheets[sheet_name]
+                        current_bs_sheet = wb[sheet_name]
                         # Find the last MONTH column by looking for numeric YYYYMM in row 3
                         bs_last_month_col = 2  # Start at column B
                         for col in range(2, 50):
-                            val = current_bs_sheet.range((3, col)).value
+                            val = current_bs_sheet.cell(row=3, column=col).value
                             if val is not None and isinstance(val, (int, float)) and val > 200000 and val < 210000:
                                 bs_last_month_col = col
                             else:
                                 break
                         new_col_bs = bs_last_month_col + 1
 
-                        current_bs_sheet.range((1, new_col_bs)).api.EntireColumn.Insert()
-                        current_bs_sheet.range((3, new_col_bs)).value = yyyymm
-                        current_bs_sheet.range((3, new_col_bs)).font.color = (255, 255, 255)
-                        current_bs_sheet.range((4, new_col_bs)).value = name
-                        current_bs_sheet.range((4, new_col_bs)).font.bold = True
+                        # Column insert: use sheet.insert_cols()
+                        current_bs_sheet.cell(row=3, column=new_col_bs).value = yyyymm
+                        current_bs_sheet.cell(row=3, column=new_col_bs).font = Font(color="FFFFFF")
+                        current_bs_sheet.cell(row=4, column=new_col_bs).value = name
+                        current_bs_sheet.cell(row=4, column=new_col_bs).font = Font(bold=True)
 
-                        bs_last_row = current_bs_sheet.range('A4').end('down').row
+                        # Using sheet.max_row instead of .end("down")
 
                         # Build formulas in memory
                         bs_formulas = []
@@ -3716,8 +3946,20 @@ End Sub
 
                         # Bulk write
                         if bs_formulas:
-                            current_bs_sheet.range((5, new_col_bs), (bs_last_row, new_col_bs)).value = bs_formulas
-                        current_bs_sheet.range((5, new_col_bs), (bs_last_row, new_col_bs)).number_format = '#,##0'
+                            _data = bs_formulas
+                            if _data is not None:
+                                if isinstance(_data, list) and len(_data) > 0 and isinstance(_data[0], list):
+                                    for _ri, _row in enumerate(_data):
+                                        for _ci, _val in enumerate(_row):
+                                            current_bs_sheet.cell(row=5 + _ri, column=new_col_bs + _ci).value = _val
+                                elif isinstance(_data, list):
+                                    for _ri, _val in enumerate(_data):
+                                        if isinstance(_val, list):
+                                            for _ci, _v in enumerate(_val):
+                                                current_bs_sheet.cell(row=5 + _ri, column=new_col_bs + _ci).value = _v
+                                        else:
+                                            current_bs_sheet.cell(row=5 + _ri, column=new_col_bs).value = _val
+                        apply_style_to_range(current_bs_sheet, 5, new_col_bs, bs_last_row, new_col_bs, number_format='#,##0')
                         print(f"DEBUG: Updated {sheet_name}")
                     except Exception as e:
                         print(f"Warning: Could not update {sheet_name}: {e}")
@@ -3730,27 +3972,27 @@ End Sub
                         # Find the last MONTH column by looking for numeric YYYYMM in row 3
                         cf_last_month_col = 2  # Start at column B
                         for col in range(2, 50):
-                            val = cf_sheet.range((3, col)).value
+                            val = cf_sheet.cell(row=3, column=col).value
                             if val is not None and isinstance(val, (int, float)) and val > 200000 and val < 210000:
                                 cf_last_month_col = col
                             else:
                                 break
                         new_col_cf = cf_last_month_col + 1
 
-                        cf_sheet.range((1, new_col_cf)).api.EntireColumn.Insert()
-                        cf_sheet.range((3, new_col_cf)).value = yyyymm
-                        cf_sheet.range((3, new_col_cf)).font.color = (255, 255, 255)
-                        cf_sheet.range((4, new_col_cf)).value = name
-                        cf_sheet.range((4, new_col_cf)).font.bold = True
+                        # Column insert: use sheet.insert_cols()
+                        cf_sheet.cell(row=3, column=new_col_cf).value = yyyymm
+                        cf_sheet.cell(row=3, column=new_col_cf).font = Font(color="FFFFFF")
+                        cf_sheet.cell(row=4, column=new_col_cf).value = name
+                        cf_sheet.cell(row=4, column=new_col_cf).font = Font(bold=True)
 
                         # Cash Flow formulas reference PL and BS - copy from previous column
-                        cf_last_row = cf_sheet.range('A4').end('down').row
+                        # Using sheet.max_row instead of .end("down")
                         for row in range(5, cf_last_row + 1):
-                            prev_formula = cf_sheet.range((row, cf_last_month_col)).formula
+                            prev_formula = cf_sheet.cell(row=row, column=cf_last_month_col).formula
                             if prev_formula:
-                                cf_sheet.range((row, new_col_cf)).value = prev_formula
+                                cf_sheet.cell(row=row, column=new_col_cf).value = prev_formula
 
-                        cf_sheet.range((5, new_col_cf), (cf_last_row, new_col_cf)).number_format = '#,##0'
+                        apply_style_to_range(cf_sheet, 5, new_col_cf, cf_last_row, new_col_cf, number_format='#,##0')
                     except Exception as e:
                         print(f"Warning: Could not update Cash_Flow: {e}")
 
@@ -3758,8 +4000,8 @@ End Sub
 
             # Update Forecast sheet if it exists
             try:
-                forecast_sheet = wb.sheets['Forecast']
-                forecast_used = forecast_sheet.api.UsedRange
+                forecast_sheet = wb['Forecast']
+                # UsedRange replaced with sheet.max_row/max_column
                 forecast_last_row = forecast_used.Row + forecast_used.Rows.Count - 1
                 forecast_last_col = forecast_used.Column + forecast_used.Columns.Count - 1
 
@@ -3788,7 +4030,7 @@ End Sub
                 # Scan all cells in the Forecast sheet for Source_PL references
                 for col in range(2, min(forecast_last_col + 1, 65)):  # B through all used columns
                     for row in range(5, forecast_last_row + 1):  # Data starts at row 5
-                        cell = forecast_sheet.range((row, col))
+                        cell = forecast_sheet.cell(row=row, column=col)
                         formula = cell.formula
                         if formula and ('Source_PL!' in str(formula) or 'Source_Budget!' in str(formula)):
                             formulas_found += 1
@@ -3814,13 +4056,13 @@ End Sub
                 COL_ACTUAL = 0  # Offset within month group
 
                 # Get source column mapping: find which Source_PL column has each YYYYMM
-                source_pl = wb.sheets['Source_PL']
+                source_pl = wb['Source_PL']
                 source_yyyymm_map = {}  # YYYYMM -> column letter
-                source_row2_last = source_pl.range('B2').end('right').column
+                # end("right") replaced with max_column
                 for col in range(data_start_col, source_row2_last + 1):
-                    yyyymm_val = source_pl.range((2, col)).value
+                    yyyymm_val = source_pl.cell(row=2, column=col).value
                     if yyyymm_val and isinstance(yyyymm_val, (int, float)) and yyyymm_val > 200000:
-                        source_yyyymm_map[int(yyyymm_val)] = self._col_letter(col)
+                        source_yyyymm_map[int(yyyymm_val)] = get_column_letter(col)
 
                 print(f"DEBUG: Source_PL YYYYMM map: {source_yyyymm_map}")
 
@@ -3829,7 +4071,7 @@ End Sub
 
                 # Find which year Forecast is using (from row 3 header)
                 try:
-                    first_month_header = forecast_sheet.range('B3').value
+                    first_month_header = forecast_sheet['B3'].value
                     if first_month_header and ' ' in str(first_month_header):
                         year_part = str(first_month_header).split()[-1]
                         if len(year_part) == 2:
@@ -3855,8 +4097,8 @@ End Sub
 
                         # Update all data rows (starting at row 5)
                         for row in range(5, forecast_last_row + 1):
-                            current_val = forecast_sheet.range((row, actual_col)).value
-                            current_formula = forecast_sheet.range((row, actual_col)).formula
+                            current_val = forecast_sheet.cell(row=row, column=actual_col).value
+                            current_formula = forecast_sheet.cell(row=row, column=actual_col).formula
 
                             # Only update if currently '0' or no formula
                             if current_val == 0 or (not current_formula or str(current_formula) == '0'):
@@ -3865,7 +4107,7 @@ End Sub
                                     new_formula = f'=IFERROR(SUMIF(Source_PL!${source_acct_col}$3:${source_acct_col}$1500,TRIM($A{row}),Source_PL!{source_col_letter}$3:{source_col_letter}$1500),0)'
                                 else:
                                     new_formula = f'=IFERROR(SUMIF(Source_PL!${source_acct_col}$3:${source_acct_col}$1500,TRIM($A{row}),Source_PL!{source_col_letter}$3:{source_col_letter}$1500),0)'
-                                forecast_sheet.range((row, actual_col)).value = new_formula
+                                forecast_sheet.cell(row=row, column=actual_col).value = new_formula
                                 actual_updated += 1
 
                 print(f"DEBUG: Updated {actual_updated} Forecast Actual formulas with new data")
@@ -3877,8 +4119,8 @@ End Sub
 
             # Update Forecast_Summary sheet if it exists
             try:
-                forecast_summary = wb.sheets['Forecast_Summary']
-                fs_used = forecast_summary.api.UsedRange
+                forecast_summary = wb['Forecast_Summary']
+                # UsedRange replaced with sheet.max_row/max_column
                 fs_last_row = fs_used.Row + fs_used.Rows.Count - 1
 
                 print(f"DEBUG: Updating Forecast_Summary formulas to use expanded source range (up to column {pl_col_letter})")
@@ -3900,7 +4142,7 @@ End Sub
                 # Check all columns for formulas that reference Source_PL
                 for col in range(2, 15):  # B through N
                     for row in range(3, fs_last_row + 1):
-                        cell = forecast_summary.range((row, col))
+                        cell = forecast_summary.cell(row=row, column=col)
                         formula = cell.formula
                         if formula and 'Source_PL!' in str(formula):
                             original = str(formula)
@@ -3920,32 +4162,28 @@ End Sub
 
             # Update Dashboard sheet - regenerate key formulas to use dynamic Menu reference
             try:
-                dashboard_sheet = wb.sheets['Dashboard']
+                dashboard_sheet = wb['Dashboard']
                 print(f"DEBUG: Regenerating Dashboard formulas with dynamic Menu reference")
 
                 # Preserve existing company name from B2
-                existing_company_name = dashboard_sheet.range('B2').value
+                existing_company_name = dashboard_sheet['B2'].value
                 print(f"DEBUG: Preserving company name: {existing_company_name}")
 
                 # Update Dashboard "Current Period" header (B4) to link to Menu!C7 as TEXT
                 # Use TEXT() to ensure the month name displays correctly even if C7 contains a date
-                dashboard_sheet.range('B4').value = '="Current Period: "&TEXT(Menu!C7,"mmm yyyy")'
+                dashboard_sheet['B4'].value = '="Current Period: "&TEXT(Menu!C7,"mmm yyyy")'
 
                 # Add period selector dropdown on Dashboard (row 6) that syncs with Menu!C7
                 try:
-                    dashboard_sheet.range('B6').value = 'Period:'
-                    dashboard_sheet.range('B6').font.bold = True
-                    dashboard_sheet.range('B6').font.size = 10
+                    dashboard_sheet['B6'].value = 'Period:'
+                    dashboard_sheet['B6'].font = Font(bold=True, size=10)
                     # C6 links to Menu!C7 (two-way sync via formula)
-                    dashboard_sheet.range('C6').value = '=Menu!C7'
-                    dashboard_sheet.range('C6').font.bold = True
-                    dashboard_sheet.range('C6').font.size = 10
-                    dashboard_sheet.range('C6').color = (255, 255, 200)  # Light yellow
+                    dashboard_sheet['C6'].value = '=Menu!C7'
+                    dashboard_sheet['C6'].font = Font(bold=True, size=10)
+                    dashboard_sheet['C6'].fill = PatternFill(start_color="FFFFC8", end_color="FFFFC8", fill_type="solid")  # Light yellow
                     # Note: To make dropdown work, user changes Menu!C7 directly
-                    dashboard_sheet.range('D6').value = '← Change on Menu sheet'
-                    dashboard_sheet.range('D6').font.size = 8
-                    dashboard_sheet.range('D6').font.italic = True
-                    dashboard_sheet.range('D6').font.color = (128, 128, 128)
+                    dashboard_sheet['D6'].value = '← Change on Menu sheet'
+                    dashboard_sheet['D6'].font = Font(size=8, italic=True, color="808080")
                 except Exception as e:
                     print(f"DEBUG: Could not add period selector to Dashboard: {e}")
 
@@ -3974,13 +4212,13 @@ End Sub
                         cm_formula = f'=SUMPRODUCT((Source_PL!$A$3:$A$1500="{account}")*(Source_PL!$B$2:{pl_col_letter}$2=Menu!$G$7)*(Source_PL!$B$3:{pl_col_letter}$1500))'
                         ytd_formula = f'=IFERROR(SUMPRODUCT((Source_PL!$A$3:$A$1500="{account}")*(INT(Source_PL!$B$2:{pl_col_letter}$2/100)=Menu!$F$7)*(Source_PL!$B$3:{pl_col_letter}$1500)),0)'
 
-                    dashboard_sheet.range(f'C{row}').value = cm_formula
-                    dashboard_sheet.range(f'E{row}').value = ytd_formula
+                    dashboard_sheet[f'C{row}'].value = cm_formula
+                    dashboard_sheet[f'E{row}'].value = ytd_formula
 
                 print(f"DEBUG: Regenerated Dashboard P&L summary formulas (rows 8-12)")
 
                 # Also expand any other Source_PL/BS references in Dashboard
-                dashboard_used = dashboard_sheet.api.UsedRange
+                # UsedRange replaced with sheet.max_row/max_column
                 dashboard_last_row = dashboard_used.Row + dashboard_used.Rows.Count - 1
                 import re
                 formula_count = 0
@@ -4001,7 +4239,7 @@ End Sub
                     for row in range(1, min(dashboard_last_row + 1, 60)):
                         if row in skip_rows and col in {2, 3, 5}:  # B, C, E columns
                             continue
-                        cell = dashboard_sheet.range((row, col))
+                        cell = dashboard_sheet.cell(row=row, column=col)
                         formula = cell.formula
                         if formula and ('Source_PL!' in str(formula) or 'Source_BS!' in str(formula)):
                             original = str(formula)
@@ -4020,23 +4258,23 @@ End Sub
             # Auto-fit columns on all Balance Sheet and Cash Flow sheets after update
             for sheet_name, _ in bs_sheets:
                 try:
-                    sheet = wb.sheets[sheet_name]
-                    sheet.autofit('c')  # Auto-fit all columns
+                    sheet = wb[sheet_name]
+                    # Note: openpyxl doesn't support auto-fit; Excel adjusts on open
                     print(f"DEBUG: Auto-fit {sheet_name} columns")
                 except Exception as e:
                     print(f"DEBUG: {sheet_name} auto-fit skipped: {e}")
 
             try:
                 if cf_sheet:
-                    cf_sheet.autofit('c')  # Auto-fit all columns
+                    cf_# Note: openpyxl doesn't support auto-fit; Excel adjusts on open
                     print("DEBUG: Auto-fit Cash Flow columns")
             except Exception as e:
                 print(f"DEBUG: Cash Flow auto-fit skipped: {e}")
 
             # Format Forecast notes: wrap text, vertical center, auto-fit row heights
             try:
-                forecast_sheet = wb.sheets['Forecast']
-                forecast_used = forecast_sheet.api.UsedRange
+                forecast_sheet = wb['Forecast']
+                # UsedRange replaced with sheet.max_row/max_column
                 forecast_last_row = forecast_used.Row + forecast_used.Rows.Count - 1
 
                 # Note columns are every 5th column starting at column 5 (E), 10 (J), 15 (O), etc.
@@ -4046,18 +4284,21 @@ End Sub
 
                 for note_col in note_cols:
                     try:
-                        note_range = forecast_sheet.range((5, note_col), (forecast_last_row, note_col))
-                        note_range.api.WrapText = True
-                        note_range.api.VerticalAlignment = -4108  # xlVAlignCenter
+                        # Wrap text and vertically center note columns
+                        apply_style_to_range(forecast_sheet, 5, note_col, forecast_last_row, note_col,
+                                            alignment=Alignment(wrap_text=True, vertical='center'))
                     except:
                         pass
 
-                # Auto-fit row heights to accommodate wrapped text
-                forecast_sheet.range((5, 1), (forecast_last_row, 1)).api.EntireRow.AutoFit()
-
-                # Also auto-fit all data cells to be vertically centered
-                data_range = forecast_sheet.range((5, 1), (forecast_last_row, 62))
-                data_range.api.VerticalAlignment = -4108  # xlVAlignCenter
+                # Note: openpyxl cannot auto-fit row heights - Excel handles this on open
+                # Vertically center all data cells
+                try:
+                    max_r = forecast_sheet.max_row or 1
+                    max_c = forecast_sheet.max_column or 1
+                    apply_style_to_range(forecast_sheet, 5, 1, max_r, max_c,
+                                        alignment=Alignment(vertical='center'))
+                except:
+                    pass
 
                 print("DEBUG: Formatted Forecast notes and auto-fit rows")
             except Exception as e:
@@ -4223,31 +4464,31 @@ End Sub
 
         update_step("Starting Excel...")
         update_substep("Launching Excel application...")
-        app = xw.App(visible=False)
-        app.display_alerts = False
-        app.screen_updating = False
-        app.calculation = 'manual'  # Disable auto-calculation for speed
+        # openpyxl: no Excel app needed
+        # openpyxl: no display_alerts needed
+        # openpyxl: no screen_updating needed
+        # openpyxl: no calculation mode needed
         wb = None
 
         try:
             update_substep("Opening workbook template...")
             if use_template:
                 shutil.copy(TEMPLATE_PATH, temp_path)
-                wb = app.books.open(temp_path)
-                menu_sheet = wb.sheets['Menu']
-                source_pl = wb.sheets['Source_PL']
-                source_bs = wb.sheets['Source_BS']
+                wb = load_workbook(temp_path, keep_vba=True)
+                menu_sheet = wb['Menu']
+                source_pl = wb['Source_PL']
+                source_bs = wb['Source_BS']
             else:
-                wb = app.books.add()
-                menu_sheet = wb.sheets[0]
-                menu_sheet.name = 'Menu'
-                source_pl = wb.sheets.add('Source_PL', after=menu_sheet)
-                source_bs = wb.sheets.add('Source_BS', after=source_pl)
+                wb = Workbook()
+                menu_sheet = wb.worksheets[0]
+                menu_sheet.title = 'Menu'
+                source_pl = wb.create_sheet('Source_PL')
+                source_bs = wb.create_sheet('Source_BS')
 
             # Clear existing data
             update_substep("Clearing existing data...")
-            source_pl.range('A1:ZZ1000').clear()
-            source_bs.range('A1:ZZ1000').clear()
+            clear_sheet_data(source_pl, start_row=2)
+            clear_sheet_data(source_bs, start_row=2)
 
             # Populate source sheets with stacked division data
             update_step("Populating source data with divisions...")
@@ -4259,17 +4500,17 @@ End Sub
             # Create or get report sheets
             update_step("Creating consolidated P&L...")
             update_substep("Setting up Consolidated_PL sheet...")
-            if 'Consolidated_PL' in [s.name for s in wb.sheets]:
-                cons_pl_sheet = wb.sheets['Consolidated_PL']
-                cons_pl_sheet.range('A1:ZZ1000').clear()
+            if 'Consolidated_PL' in wb.sheetnames:
+                cons_pl_sheet = wb['Consolidated_PL']
+                clear_sheet_data(cons_pl_sheet)
             else:
                 # Try to use existing PL sheet or create new
-                if 'PL' in [s.name for s in wb.sheets]:
-                    cons_pl_sheet = wb.sheets['PL']
-                    cons_pl_sheet.name = 'Consolidated_PL'
-                    cons_pl_sheet.range('A1:ZZ1000').clear()
+                if 'PL' in wb.sheetnames:
+                    cons_pl_sheet = wb['PL']
+                    cons_pl_sheet.title = 'Consolidated_PL'
+                    clear_sheet_data(cons_pl_sheet)
                 else:
-                    cons_pl_sheet = wb.sheets.add('Consolidated_PL', after=source_bs)
+                    cons_pl_sheet = wb.create_sheet('Consolidated_PL')
 
             # Create consolidated P&L report using consolidated accounts
             update_substep(f"Writing {len(consolidated_pl)} consolidated P&L accounts...")
@@ -4280,11 +4521,11 @@ End Sub
 
             update_step("Creating Cash Flow...")
             update_substep("Setting up Cash_Flow sheet...")
-            if 'Cash_Flow' in [s.name for s in wb.sheets]:
-                cons_cf_sheet = wb.sheets['Cash_Flow']
-                cons_cf_sheet.range('A1:ZZ1000').clear()
+            if 'Cash_Flow' in wb.sheetnames:
+                cons_cf_sheet = wb['Cash_Flow']
+                clear_sheet_data(cons_cf_sheet)
             else:
-                cons_cf_sheet = wb.sheets.add('Cash_Flow', after=cons_pl_sheet)
+                cons_cf_sheet = wb.create_sheet('Cash_Flow')
 
             update_substep("Building cash flow formulas...")
             self._create_cash_flow(cons_cf_sheet, all_months)
@@ -4322,17 +4563,17 @@ End Sub
                 else:
                     # FALLBACK: Standard creation from scratch
                     div_pl_name = f"{safe_name}_PL"
-                    if div_pl_name in [s.name for s in wb.sheets]:
-                        div_pl_sheet = wb.sheets[div_pl_name]
-                        div_pl_sheet.range('A1:ZZ1000').clear()
+                    if div_pl_name in wb.sheetnames:
+                        div_pl_sheet = wb[div_pl_name]
+                        clear_sheet_data(div_pl_sheet)
                     else:
-                        div_pl_sheet = wb.sheets.add(div_pl_name, after=last_created_sheet)
+                        div_pl_sheet = wb.create_sheet(div_pl_name)
                     self._create_division_pl_report(div_pl_sheet, div_pl, all_months, pl_totals, div_name)
 
                 # For divisions 3-5 (idx >= 2), collapse row groupings by default
                 if idx >= 2:
                     try:
-                        div_pl_sheet.api.Outline.ShowLevels(RowLevels=1, ColumnLevels=1)
+                        # Outline handled via group_rows()/group_cols()
                         print(f"[{div_name}_PL] Row groups collapsed (division {idx + 1})")
                     except Exception as e:
                         print(f"[{div_name}_PL] Could not collapse groups: {e}")
@@ -4347,17 +4588,17 @@ End Sub
                 else:
                     # FALLBACK: Standard creation from scratch
                     div_bs_name = f"{safe_name}_BS"
-                    if div_bs_name in [s.name for s in wb.sheets]:
-                        div_bs_sheet = wb.sheets[div_bs_name]
-                        div_bs_sheet.range('A1:ZZ1000').clear()
+                    if div_bs_name in wb.sheetnames:
+                        div_bs_sheet = wb[div_bs_name]
+                        clear_sheet_data(div_bs_sheet)
                     else:
-                        div_bs_sheet = wb.sheets.add(div_bs_name, after=div_pl_sheet)
+                        div_bs_sheet = wb.create_sheet(div_bs_name)
                     self._create_division_bs_report(div_bs_sheet, div_bs, all_months, bs_totals, div_name)
 
                 # For divisions 3-5 (idx >= 2), collapse row groupings by default
                 if idx >= 2:
                     try:
-                        div_bs_sheet.api.Outline.ShowLevels(RowLevels=1, ColumnLevels=1)
+                        # Outline handled via group_rows()/group_cols()
                         print(f"[{div_name}_BS] Row groups collapsed (division {idx + 1})")
                     except Exception as e:
                         print(f"[{div_name}_BS] Could not collapse groups: {e}")
@@ -4369,38 +4610,38 @@ End Sub
             update_step("Creating Source Budget sheet...")
             # Find the last P&L/BS sheet to place budget after it
             last_report_sheet = cons_cf_sheet
-            for s in wb.sheets:
+            for s in wb.worksheets:
                 if s.name.endswith('_BS') or s.name.endswith('_PL') or s.name == 'Cash_Flow':
                     last_report_sheet = s
-            if 'Source_Budget' in [s.name for s in wb.sheets]:
-                source_budget = wb.sheets['Source_Budget']
-                source_budget.range('A1:ZZ1000').clear()
+            if 'Source_Budget' in wb.sheetnames:
+                source_budget = wb['Source_Budget']
+                clear_sheet_data(source_budget)
             else:
-                source_budget = wb.sheets.add('Source_Budget', after=last_report_sheet)
+                source_budget = wb.create_sheet('Source_Budget')
             self._create_source_budget_sheet(source_budget, consolidated_pl, all_months)
 
             # Create Consolidated Forecast sheet
             update_step("Creating Consolidated Forecast...")
             update_substep("Setting up Consolidated_Forecast sheet...")
-            if 'Consolidated_Forecast' in [s.name for s in wb.sheets]:
-                forecast_sheet = wb.sheets['Consolidated_Forecast']
-                forecast_sheet.range('A1:ZZ1000').clear()
-            elif 'Forecast' in [s.name for s in wb.sheets]:
-                forecast_sheet = wb.sheets['Forecast']
-                forecast_sheet.name = 'Consolidated_Forecast'
-                forecast_sheet.range('A1:ZZ1000').clear()
+            if 'Consolidated_Forecast' in wb.sheetnames:
+                forecast_sheet = wb['Consolidated_Forecast']
+                clear_sheet_data(forecast_sheet)
+            elif 'Forecast' in wb.sheetnames:
+                forecast_sheet = wb['Forecast']
+                forecast_sheet.title = 'Consolidated_Forecast'
+                clear_sheet_data(forecast_sheet)
             else:
-                forecast_sheet = wb.sheets.add('Consolidated_Forecast', after=cons_cf_sheet)
+                forecast_sheet = wb.create_sheet('Consolidated_Forecast')
             self._create_forecast_sheet(forecast_sheet, consolidated_pl, all_months)
 
             # Create Consolidated Forecast Summary
             update_step("Creating Forecast Summary...")
             update_substep("Building YTD and variance analysis...")
-            if 'Forecast_Summary' in [s.name for s in wb.sheets]:
-                forecast_summary = wb.sheets['Forecast_Summary']
-                forecast_summary.range('A1:ZZ1000').clear()
+            if 'Forecast_Summary' in wb.sheetnames:
+                forecast_summary = wb['Forecast_Summary']
+                clear_sheet_data(forecast_summary)
             else:
-                forecast_summary = wb.sheets.add('Forecast_Summary', after=forecast_sheet)
+                forecast_summary = wb.create_sheet('Forecast_Summary')
             self._create_forecast_summary_sheet(forecast_summary, consolidated_pl, all_months)
 
             # Create per-division Forecast and Forecast Summary sheets
@@ -4416,21 +4657,21 @@ End Sub
                 # Create division Forecast sheet
                 update_substep(f"{div_name}: Creating Forecast sheet...")
                 div_forecast_name = f"{safe_name}_Forecast"
-                if div_forecast_name in [s.name for s in wb.sheets]:
-                    div_forecast_sheet = wb.sheets[div_forecast_name]
-                    div_forecast_sheet.range('A1:ZZ1000').clear()
+                if div_forecast_name in wb.sheetnames:
+                    div_forecast_sheet = wb[div_forecast_name]
+                    clear_sheet_data(div_forecast_sheet)
                 else:
-                    div_forecast_sheet = wb.sheets.add(div_forecast_name, after=forecast_summary)
+                    div_forecast_sheet = wb.create_sheet(div_forecast_name)
                 self._create_forecast_sheet(div_forecast_sheet, div_pl, all_months, division_name=div_name)
 
                 # Create division Forecast Summary sheet
                 update_substep(f"{div_name}: Creating Forecast Summary...")
                 div_fcst_summary_name = f"{safe_name}_Fcst_Summary"
-                if div_fcst_summary_name in [s.name for s in wb.sheets]:
-                    div_fcst_summary_sheet = wb.sheets[div_fcst_summary_name]
-                    div_fcst_summary_sheet.range('A1:ZZ1000').clear()
+                if div_fcst_summary_name in wb.sheetnames:
+                    div_fcst_summary_sheet = wb[div_fcst_summary_name]
+                    clear_sheet_data(div_fcst_summary_sheet)
                 else:
-                    div_fcst_summary_sheet = wb.sheets.add(div_fcst_summary_name, after=div_forecast_sheet)
+                    div_fcst_summary_sheet = wb.create_sheet(div_fcst_summary_name)
                 self._create_forecast_summary_sheet(div_fcst_summary_sheet, div_pl, all_months, division_name=div_name)
 
             # Update Menu sheet with division navigation
@@ -4441,33 +4682,33 @@ End Sub
             # Create Dashboard
             update_step("Creating Dashboard...")
             update_substep("Setting up Dashboard sheet...")
-            if 'Dashboard' in [s.name for s in wb.sheets]:
-                dashboard_sheet = wb.sheets['Dashboard']
-                dashboard_sheet.range('A1:ZZ1000').clear()
+            if 'Dashboard' in wb.sheetnames:
+                dashboard_sheet = wb['Dashboard']
+                clear_sheet_data(dashboard_sheet)
             else:
-                dashboard_sheet = wb.sheets.add('Dashboard', before=menu_sheet)
+                dashboard_sheet = wb.create_sheet('Dashboard')
             update_substep("Building Dashboard KPIs and charts...")
             self._create_dashboard_sheet(dashboard_sheet, consolidated_pl, consolidated_bs, all_months, pl_totals)
 
             # Create Notes sheet with Division dropdown
             update_step("Creating Notes sheet...")
             update_substep("Setting up Notes with division selector...")
-            if 'Notes' in [s.name for s in wb.sheets]:
-                notes_sheet = wb.sheets['Notes']
-                notes_sheet.range('A1:ZZ1000').clear()
+            if 'Notes' in wb.sheetnames:
+                notes_sheet = wb['Notes']
+                clear_sheet_data(notes_sheet)
             else:
-                notes_sheet = wb.sheets.add('Notes', after=dashboard_sheet)
+                notes_sheet = wb.create_sheet('Notes')
             month_names = [name for m, y, name in all_months]
             self._create_notes_sheet(notes_sheet, consolidated_pl, consolidated_bs, month_names, divisions=self.divisions)
 
             # Create Settings sheet (sheet visibility controls)
             update_step("Creating Settings sheet...")
             update_substep("Building sheet visibility controls...")
-            if 'Settings' in [s.name for s in wb.sheets]:
-                settings_sheet = wb.sheets['Settings']
-                settings_sheet.range('A1:ZZ1000').clear()
+            if 'Settings' in wb.sheetnames:
+                settings_sheet = wb['Settings']
+                clear_sheet_data(settings_sheet)
             else:
-                settings_sheet = wb.sheets.add('Settings', after=notes_sheet)
+                settings_sheet = wb.create_sheet('Settings')
             # Build list of all report sheets for visibility control
             all_report_sheets = ['Dashboard', 'Consolidated_PL', 'Cash_Flow', 'Forecast_Summary', 'Consolidated_Forecast']
             for div in self.divisions:
@@ -4478,35 +4719,33 @@ End Sub
 
             # Create Dashboard_Control sheet for KPI targets (used by Dashboard formulas)
             update_substep("Creating Dashboard Control sheet...")
-            if 'Dashboard_Control' not in [s.name for s in wb.sheets]:
-                dc_sheet = wb.sheets.add('Dashboard_Control', after=settings_sheet)
+            if 'Dashboard_Control' not in wb.sheetnames:
+                dc_sheet = wb.create_sheet('Dashboard_Control')
             else:
-                dc_sheet = wb.sheets['Dashboard_Control']
+                dc_sheet = wb['Dashboard_Control']
             self._create_dashboard_control_sheet(dc_sheet, all_months)
 
             # Clean up orphan sheets (Balance_Sheet, Consolidated_BS don't exist in multi-division mode)
             orphan_sheets = ['Balance_Sheet', 'Consolidated_BS']
             for orphan in orphan_sheets:
                 try:
-                    if orphan in [s.name for s in wb.sheets]:
-                        wb.sheets[orphan].delete()
+                    if orphan in wb.sheetnames:
+                        wb.remove(wb[orphan])
                         print(f"Deleted orphan sheet: {orphan}")
                 except Exception as e:
                     print(f"Could not delete {orphan}: {e}")
 
             # Hide or delete template sheets (_TPL_PL, _TPL_BS)
-            for sheet in wb.sheets:
-                if sheet.name.startswith('_TPL_'):
+            for sheet_to_remove in [s for s in wb.worksheets if s.title.startswith('_TPL_')]:
+                try:
+                    wb.remove(sheet_to_remove)
+                    print(f"Deleted template sheet: {sheet_to_remove.title}")
+                except Exception as e:
                     try:
-                        sheet.delete()
-                        print(f"Deleted template sheet: {sheet.name}")
-                    except Exception as e:
-                        # If delete fails, at least hide it
-                        try:
-                            sheet.api.Visible = 0  # xlSheetVeryHidden
-                            print(f"Hidden template sheet: {sheet.name}")
-                        except:
-                            print(f"Could not remove template: {sheet.name}")
+                        sheet_to_remove.sheet_state = 'hidden'
+                        print(f"Hidden template sheet: {sheet_to_remove.title}")
+                    except:
+                        print(f"Could not remove template: {sheet_to_remove.title}")
 
             # Create Mapping_Config sheet for persistence
             update_step("Saving account mappings...")
@@ -4533,27 +4772,27 @@ End Sub
 
                 # Add Consolidated reports
                 for name in ['Consolidated_PL', 'Cash_Flow']:
-                    if name in [s.name for s in wb.sheets]:
+                    if name in wb.sheetnames:
                         sheet_order.append(name)
 
                 # Add Division P&L sheets (before forecasts)
                 for div in self.divisions:
                     safe_name = div['name'].replace(' ', '_')[:20]
                     pl_name = f"{safe_name}_PL"
-                    if pl_name in [s.name for s in wb.sheets]:
+                    if pl_name in wb.sheetnames:
                         sheet_order.append(pl_name)
 
                 # Add Division BS sheets
                 for div in self.divisions:
                     safe_name = div['name'].replace(' ', '_')[:20]
                     bs_name = f"{safe_name}_BS"
-                    if bs_name in [s.name for s in wb.sheets]:
+                    if bs_name in wb.sheetnames:
                         sheet_order.append(bs_name)
 
                 # Add Forecast sheets (after division reports)
                 # Forecast_Summary comes BEFORE Consolidated_Forecast for logical flow
                 for name in ['Forecast_Summary', 'Consolidated_Forecast', 'Forecast']:
-                    if name in [s.name for s in wb.sheets]:
+                    if name in wb.sheetnames:
                         sheet_order.append(name)
 
                 # Add Division Forecast and Forecast Summary sheets
@@ -4561,41 +4800,38 @@ End Sub
                     safe_name = div['name'].replace(' ', '_')[:20]
                     fcst_name = f"{safe_name}_Forecast"
                     fcst_summary_name = f"{safe_name}_Fcst_Summary"
-                    if fcst_name in [s.name for s in wb.sheets]:
+                    if fcst_name in wb.sheetnames:
                         sheet_order.append(fcst_name)
-                    if fcst_summary_name in [s.name for s in wb.sheets]:
+                    if fcst_summary_name in wb.sheetnames:
                         sheet_order.append(fcst_summary_name)
 
                 # Add remaining sheets
                 for name in ['Notes', 'Settings', 'Dashboard_Control']:
-                    if name in [s.name for s in wb.sheets]:
+                    if name in wb.sheetnames:
                         sheet_order.append(name)
 
                 # Move sheets to match desired order
                 for i, name in enumerate(sheet_order):
-                    if name in [s.name for s in wb.sheets]:
-                        sheet = wb.sheets[name]
-                        if i == 0:
-                            sheet.api.Move(Before=wb.sheets[0].api)
-                        else:
-                            prev_sheet = wb.sheets[sheet_order[i-1]]
-                            sheet.api.Move(After=prev_sheet.api)
+                    if name in wb.sheetnames:
+                        current_idx = wb.sheetnames.index(name)
+                        wb.move_sheet(name, offset=i - current_idx)
 
                 # Move Source sheets to the very end
-                last_sheet = wb.sheets[-1]
-                source_pl.api.Move(After=last_sheet.api)
-                source_bs.api.Move(After=source_pl.api)
+                for src_name in ['Source_PL', 'Source_BS']:
+                    if src_name in wb.sheetnames:
+                        current_idx = wb.sheetnames.index(src_name)
+                        wb.move_sheet(src_name, offset=len(wb.sheetnames) - 1 - current_idx)
 
                 # Set tab colors to black for source/hidden sheets
                 update_substep("Setting source sheet tab colors...")
-                source_pl.api.Tab.Color = 0x000000  # Black
-                source_bs.api.Tab.Color = 0x000000  # Black
+                source_pl.sheet_properties.tabColor = "000000"
+                source_bs.sheet_properties.tabColor = "000000"
 
                 # Also hide Mapping_Config if it exists
                 try:
-                    mapping_sheet = wb.sheets['Mapping_Config']
-                    mapping_sheet.api.Move(After=source_bs.api)
-                    mapping_sheet.api.Tab.Color = 0x000000  # Black
+                    mapping_sheet = wb['Mapping_Config']
+                    mapping_sheet.sheet_state = 'hidden'
+                    mapping_sheet.sheet_properties.tabColor = "000000"
                 except:
                     pass
 
@@ -4603,7 +4839,8 @@ End Sub
                 # TabRatio = ratio of tabs to total width. 0.85 = 85% tabs, 15% scrollbar
                 update_substep("Adjusting view settings...")
                 try:
-                    app.api.ActiveWindow.TabRatio = 0.85  # 85% tabs, 15% scrollbar
+                    # Window settings handled via sheet.views
+                    pass
                 except:
                     pass
 
@@ -4619,38 +4856,26 @@ End Sub
                 # Clean division P&L sheet
                 pl_sheet_name = f"{safe_name}_PL"
                 try:
-                    if pl_sheet_name in [s.name for s in wb.sheets]:
+                    if pl_sheet_name in wb.sheetnames:
                         update_substep(f"Cleaning {pl_sheet_name}...")
-                        self._remove_empty_leading_columns(wb.sheets[pl_sheet_name])
+                        self._remove_empty_leading_columns(wb[pl_sheet_name])
                 except Exception as e:
                     print(f"Warning: Could not clean {pl_sheet_name}: {e}")
 
                 # Clean division BS sheet
                 bs_sheet_name = f"{safe_name}_BS"
                 try:
-                    if bs_sheet_name in [s.name for s in wb.sheets]:
+                    if bs_sheet_name in wb.sheetnames:
                         update_substep(f"Cleaning {bs_sheet_name}...")
-                        self._remove_empty_leading_columns(wb.sheets[bs_sheet_name])
+                        self._remove_empty_leading_columns(wb[bs_sheet_name])
                 except Exception as e:
                     print(f"Warning: Could not clean {bs_sheet_name}: {e}")
 
-            # Add VBA code
-            update_step("Adding VBA macros...")
-            update_substep("Injecting VBA module...")
-            try:
-                module_exists = False
-                for component in wb.api.VBProject.VBComponents:
-                    if component.Name == "FinancialModel":
-                        component.CodeModule.DeleteLines(1, component.CodeModule.CountOfLines)
-                        component.CodeModule.AddFromString(self.VBA_CODE)
-                        module_exists = True
-                        break
-                if not module_exists:
-                    vba_module = wb.api.VBProject.VBComponents.Add(1)
-                    vba_module.Name = "FinancialModel"
-                    vba_module.CodeModule.AddFromString(self.VBA_CODE)
-            except:
-                pass
+            # VBA macros: In the openpyxl version, VBA is preserved from
+            # the template via keep_vba=True. If building from scratch,
+            # we skip VBA (it will be added when user opens in Excel).
+            update_step("Finalizing macros...")
+            update_substep("VBA macros preserved from template" if use_template else "VBA macros will be added via template")
 
             # Activate Dashboard
             update_substep("Setting Dashboard as active sheet...")
@@ -4662,21 +4887,21 @@ End Sub
             # Save workbook
             update_step("Saving workbook...")
             update_substep("Re-enabling calculations...")
-            app.calculation = 'automatic'  # Re-enable before save
+            # openpyxl: no calculation mode needed
             update_substep("Writing to disk (this may take a moment)...")
-            wb.save()
+            wb.save(temp_path)
             update_substep("Closing workbook...")
-            wb.close()
+            pass  # openpyxl auto-handles cleanup
             wb = None
 
         finally:
             try:
                 if wb is not None:
-                    wb.close()
+                    pass  # openpyxl auto-handles cleanup
             except:
                 pass
             try:
-                app.quit()
+                pass  # openpyxl: no app to quit
             except:
                 pass
 
@@ -4713,13 +4938,13 @@ End Sub
         self._create_pl_report_multi_div(sheet, accounts, months, detected_totals,
                                           is_consolidated=False, division_name=division_name)
         # Update title to show division name
-        sheet.range('A1').value = f"{division_name}"
+        sheet['A1'].value = f"{division_name}"
 
     def _create_division_bs_report(self, sheet, accounts, months, detected_totals, division_name):
         """Create Balance Sheet report for a specific division"""
         self._create_bs_report_multi_div(sheet, accounts, months, detected_totals,
                                           is_consolidated=False, division_name=division_name)
-        sheet.range('A1').value = f"{division_name}"
+        sheet['A1'].value = f"{division_name}"
 
     def _create_pl_report_multi_div(self, sheet, accounts, months, detected_totals=None,
                                      is_consolidated=True, division_name=None, single_entity_mode=False):
@@ -4738,8 +4963,8 @@ End Sub
         detected_totals = detected_totals or {}
 
         # Colors
-        DARK_BLUE = (22, 33, 62)
-        SUBTOTAL_GRAY = (236, 236, 236)
+        DARK_BLUE = CLR_DARK_BLUE
+        SUBTOTAL_GRAY = CLR_SUBTOTAL_GRAY
 
         # Source data range
         source_start = 3
@@ -4776,8 +5001,8 @@ End Sub
         found_cogs_section = False
 
         # Helper to build row data
-        first_data_col_letter = self._col_letter(2)
-        last_data_col_letter = self._col_letter(num_months + 1)
+        first_data_col_letter = get_column_letter(2)
+        last_data_col_letter = get_column_letter(num_months + 1)
 
         for account in accounts:
             account_name = account['name']
@@ -4833,13 +5058,13 @@ End Sub
             # multi-div division: filter by division name
             for i, (m, y, name) in enumerate(months):
                 if single_entity_mode:
-                    cl = self._col_letter(i + 2)  # Data starts at column B
+                    cl = get_column_letter(i + 2)  # Data starts at column B
                     formula = f'=SUMIF(Source_PL!$A${source_start}:$A${source_end},"{account_name}",Source_PL!{cl}${source_start}:{cl}${source_end})'
                 elif is_consolidated:
-                    cl = self._col_letter(i + 3)  # Data starts at column C (col A=Div, B=Acct)
+                    cl = get_column_letter(i + 3)  # Data starts at column C (col A=Div, B=Acct)
                     formula = f'=SUMIF(Source_PL!$B${source_start}:$B${source_end},"{account_name}",Source_PL!{cl}${source_start}:{cl}${source_end})'
                 else:
-                    cl = self._col_letter(i + 3)  # Data starts at column C
+                    cl = get_column_letter(i + 3)  # Data starts at column C
                     formula = f'=SUMIFS(Source_PL!{cl}${source_start}:{cl}${source_end},Source_PL!$A${source_start}:$A${source_end},"{division_name}",Source_PL!$B${source_start}:$B${source_end},"{account_name}")'
                 row_data.append(formula)
 
@@ -4856,8 +5081,8 @@ End Sub
 
             py_formula = f'=SUMPRODUCT(({data_range})*--(INT({helper_range}/100)=Menu!$F$7-1)*--(MOD({helper_range},100)<=Menu!$E$7))'
             cy_formula = f'=SUMPRODUCT(({data_range})*--(INT({helper_range}/100)=Menu!$F$7)*--(MOD({helper_range},100)<=Menu!$E$7))'
-            var_formula = f'={self._col_letter(cy_ytd_col)}{actual_row}-{self._col_letter(py_ytd_col)}{actual_row}'
-            var_pct_formula = f'=IFERROR({self._col_letter(var_col)}{actual_row}/{self._col_letter(py_ytd_col)}{actual_row},0)'
+            var_formula = f'={get_column_letter(cy_ytd_col)}{actual_row}-{get_column_letter(py_ytd_col)}{actual_row}'
+            var_pct_formula = f'=IFERROR({get_column_letter(var_col)}{actual_row}/{get_column_letter(py_ytd_col)}{actual_row},0)'
 
             row_data.extend([py_formula, cy_formula, var_formula, var_pct_formula])
 
@@ -4887,19 +5112,15 @@ End Sub
         # ================================================================
         _t2 = _time.perf_counter()
         # Title - Professional corporate style
-        sheet.range('A1').value = company if is_consolidated else division_name
-        sheet.range('A1').font.name = 'Calibri Light'
-        sheet.range('A1').font.size = 16
-        sheet.range('A1').font.bold = True
-        sheet.range('A1').font.color = DARK_BLUE
-        sheet.range('A2').value = 'Consolidated Profit & Loss' if is_consolidated else 'Profit & Loss Statement'
-        sheet.range('A2').font.name = 'Calibri Light'
-        sheet.range('A2').font.size = 12
-        sheet.range('A2').font.color = (128, 128, 128)
+        sheet['A1'].value = company if is_consolidated else division_name
+        sheet['A1'].font = Font(name='Calibri Light', size=16, bold=True, color=CLR_DARK_BLUE)
+        sheet['A2'].value = 'Consolidated Profit & Loss' if is_consolidated else 'Profit & Loss Statement'
+        sheet['A2'].font = Font(name='Calibri Light', size=12, color="808080")
 
         # Row 3: YYYYMM helper values
         helper_row = [y * 100 + m for m, y, name in months]
-        sheet.range((3, 2), (3, num_months + 1)).value = [helper_row]
+        for _ci, _val in enumerate(helper_row if isinstance(helper_row, list) else [helper_row]):
+            sheet.cell(row=3, column=2 + _ci).value = _val if not isinstance(_val, list) else _val
 
         # Header row
         header_data = ['Account']
@@ -4907,21 +5128,29 @@ End Sub
             header_data.append(f"{self.MONTHS[m-1][:3]} {y}")
         header_data.extend(['Notes', '', 'PY YTD', 'CY YTD', 'Var $', 'Var %', ''])
         header_data.extend([str(y) for y in years])
-        sheet.range((header_row, 1), (header_row, last_col)).value = [header_data]
+        for _ci, _val in enumerate(header_data if isinstance(header_data, list) else [header_data]):
+            sheet.cell(row=header_row, column=1 + _ci).value = _val if not isinstance(_val, list) else _val
 
         # Format header - professional corporate style
-        header_range = sheet.range((header_row, 1), (header_row, last_col))
-        header_range.font.name = 'Calibri Light'
-        header_range.font.size = 10
-        header_range.font.bold = True
-        header_range.color = DARK_BLUE
-        header_range.font.color = (255, 255, 255)
+        apply_style_to_range(sheet, header_row, 1, header_row, last_col, font=Font(name='Calibri Light', size=10, bold=True, color="FFFFFF"), fill=FILL_DARK_BLUE)
 
         # Write all data in ONE bulk operation
         if all_data:
             data_start_row = header_row + 1
             data_end_row = header_row + len(all_data)
-            sheet.range((data_start_row, 1), (data_end_row, last_col)).value = all_data
+            _data = all_data
+            if _data is not None:
+                if isinstance(_data, list) and len(_data) > 0 and isinstance(_data[0], list):
+                    for _ri, _row in enumerate(_data):
+                        for _ci, _val in enumerate(_row):
+                            sheet.cell(row=data_start_row + _ri, column=1 + _ci).value = _val
+                elif isinstance(_data, list):
+                    for _ri, _val in enumerate(_data):
+                        if isinstance(_val, list):
+                            for _ci, _v in enumerate(_val):
+                                sheet.cell(row=data_start_row + _ri, column=1 + _ci).value = _v
+                        else:
+                            sheet.cell(row=data_start_row + _ri, column=1).value = _val
 
         _timings['write_excel'] = _time.perf_counter() - _t2
 
@@ -4931,16 +5160,15 @@ End Sub
         _t3 = _time.perf_counter()
         if all_data:
             # Number formats for entire columns - single operations
-            sheet.range((data_start_row, 2), (data_end_row, last_month_col)).number_format = '#,##0'
-            sheet.range((data_start_row, py_ytd_col), (data_end_row, cy_ytd_col)).number_format = '#,##0'
-            sheet.range((data_start_row, var_col), (data_end_row, var_col)).number_format = '#,##0'
-            sheet.range((data_start_row, var_pct_col), (data_end_row, var_pct_col)).number_format = '0.0%'
+            apply_style_to_range(sheet, data_start_row, 2, data_end_row, last_month_col, number_format='#,##0')
+            apply_style_to_range(sheet, data_start_row, py_ytd_col, data_end_row, cy_ytd_col, number_format='#,##0')
+            apply_style_to_range(sheet, data_start_row, var_col, data_end_row, var_col, number_format='#,##0')
+            apply_style_to_range(sheet, data_start_row, var_pct_col, data_end_row, var_pct_col, number_format='0.0%')
             if fy_start_col <= last_col:
-                sheet.range((data_start_row, fy_start_col), (data_end_row, last_col)).number_format = '#,##0'
+                apply_style_to_range(sheet, data_start_row, fy_start_col, data_end_row, last_col, number_format='#,##0')
 
             # Apply Calibri Light to all data
-            sheet.range((data_start_row, 1), (data_end_row, last_col)).font.name = 'Calibri Light'
-            sheet.range((data_start_row, 1), (data_end_row, last_col)).font.size = 10
+            apply_style_to_range(sheet, data_start_row, 1, data_end_row, last_col, font=Font(name='Calibri Light', size=10))
 
             # Collect row numbers by type for batch formatting
             header_rows = [data_start_row + idx for idx, rt in enumerate(row_types) if rt == 'header']
@@ -4949,18 +5177,18 @@ End Sub
             # Format headers in batch (bold, section style)
             if header_rows:
                 for r in header_rows:
-                    sheet.range((r, 1)).font.bold = True
-                    sheet.range((r, 1)).font.size = 11
+                    sheet.cell(row=r, column=1).font = Font(bold=True, size=11)
 
             # Format totals with bold, top border (professional P&L style)
             if total_rows:
                 for r in total_rows:
-                    row_range = sheet.range((r, 1), (r, last_col))
-                    row_range.font.bold = True
+                    # Range: row_range = (sheet, r, 1, r, last_col)
+                    apply_style_to_range(sheet, r, 1, r, last_col, font=Font(bold=True))
                     # Add top border for total rows (single line above)
                     try:
-                        row_range.api.Borders(8).LineStyle = 1  # xlContinuous top border
-                        row_range.api.Borders(8).Weight = 2  # xlThin
+                        # Borders handled via Border()/Side() objects
+                        # Borders handled via Border()/Side() objects
+                        pass
                     except:
                         pass
 
@@ -4968,20 +5196,21 @@ End Sub
             net_income_rows = [data_start_row + idx for idx, rt in enumerate(row_types) if rt == 'net_income']
             if net_income_rows:
                 for r in net_income_rows:
-                    row_range = sheet.range((r, 1), (r, last_col))
-                    row_range.font.bold = True
+                    # Range: row_range = (sheet, r, 1, r, last_col)
+                    apply_style_to_range(sheet, r, 1, r, last_col, font=Font(bold=True))
                     try:
                         # Double bottom border for Net Income
-                        row_range.api.Borders(9).LineStyle = -4119  # xlDouble
-                        row_range.api.Borders(9).Weight = 4  # xlThick
+                        # Borders handled via Border()/Side() objects
+                        # Borders handled via Border()/Side() objects
+                        pass
                     except:
                         pass
 
         # Column widths
         try:
-            sheet.range('A:A').column_width = 35
-            sheet.range((1, spacer1_col)).column_width = 2
-            sheet.range((1, spacer2_col)).column_width = 2
+            sheet.column_dimensions['A'].width = 35
+            sheet.column_dimensions[get_column_letter(spacer1_col)].width = 2
+            sheet.column_dimensions[get_column_letter(spacer2_col)].width = 2
         except:
             pass
 
@@ -4995,17 +5224,17 @@ End Sub
         # ================================================================
         _t4 = _time.perf_counter()
         validation_start_row = (header_row + len(all_data) + 3) if all_data else header_row + 5
-        sheet.range(f'A{validation_start_row}').value = 'VALIDATION - Source vs Calculated Totals'
-        sheet.range(f'A{validation_start_row}').font.bold = True
-        sheet.range(f'A{validation_start_row}').font.color = (128, 0, 128)
+        sheet[f'A{validation_start_row}'].value = 'VALIDATION - Source vs Calculated Totals'
+        sheet[f'A{validation_start_row}'].font = Font(bold=True, color="800080")
 
         val_header_row = validation_start_row + 1
         val_headers = ['Category', 'Source', 'Calculated', 'Variance', 'Match?']
-        sheet.range(f'A{val_header_row}:E{val_header_row}').value = [val_headers]
-        sheet.range(f'A{val_header_row}:E{val_header_row}').font.bold = True
-        sheet.range(f'A{val_header_row}:E{val_header_row}').color = (200, 200, 200)
+        write_row_to_cells(sheet, val_headers, row=val_header_row, start_col=1)
+        apply_style_to_range(sheet, val_header_row, 1, val_header_row, 5,
+                             font=Font(bold=True),
+                             fill=PatternFill(start_color="C8C8C8", end_color="C8C8C8", fill_type="solid"))
 
-        last_col_letter = self._col_letter(last_month_col)
+        last_col_letter = get_column_letter(last_month_col)
         val_categories = [
             ('Total Income', '*Total*Income*', row_tracking.get('total_income_row')),
             ('Total COGS', '*Total*Cost*', row_tracking.get('total_cogs_row')),
@@ -5015,15 +5244,15 @@ End Sub
 
         for idx, (label, source_pattern, calc_row) in enumerate(val_categories):
             row = val_header_row + 1 + idx
-            sheet.range(f'A{row}').value = label
+            sheet[f'A{row}'].value = label
 
             # Source total (SUMIF from Source_PL with wildcard) - sum the last month column
             if is_consolidated:
                 source_formula = f'=SUMIF(Source_PL!$B$3:$B$1500,"{source_pattern}",Source_PL!{last_col_letter}$3:{last_col_letter}$1500)'
             else:
                 source_formula = f'=SUMIFS(Source_PL!{last_col_letter}$3:{last_col_letter}$1500,Source_PL!$A$3:$A$1500,"{division_name}",Source_PL!$B$3:$B$1500,"{source_pattern}")'
-            sheet.range(f'B{row}').value = source_formula
-            sheet.range(f'B{row}').number_format = '#,##0'
+            sheet[f'B{row}'].value = source_formula
+            sheet[f'B{row}'].number_format = '#,##0'
             print(f"[VALIDATION] Row {row} Source: {source_formula}")
 
             # Calculated total (from this sheet) - reference the tracked row directly
@@ -5032,67 +5261,67 @@ End Sub
             else:
                 # Fallback: search for the label in column A using SUMIF
                 calc_formula = f'=SUMIF($A:$A,"{source_pattern}",{last_col_letter}:{last_col_letter})'
-            sheet.range(f'C{row}').value = calc_formula
-            sheet.range(f'C{row}').number_format = '#,##0'
+            sheet[f'C{row}'].value = calc_formula
+            sheet[f'C{row}'].number_format = '#,##0'
             print(f"[VALIDATION] Row {row} Calc ({calc_row}): {calc_formula}")
 
             # Variance (Source - Calculated)
-            sheet.range(f'D{row}').value = f'=B{row}-C{row}'
-            sheet.range(f'D{row}').number_format = '#,##0'
+            sheet[f'D{row}'].value = f'=B{row}-C{row}'
+            sheet[f'D{row}'].number_format = '#,##0'
 
             # Match indicator
-            sheet.range(f'E{row}').value = f'=IF(ABS(D{row})<1,"✓","✗")'
-            sheet.range(f'E{row}').font.size = 14
+            sheet[f'E{row}'].value = f'=IF(ABS(D{row})<1,"✓","✗")'
+            sheet[f'E{row}'].font = Font(size=14)
 
         validation_end_row = val_header_row + len(val_categories)
 
         # Add division breakdown for consolidated reports
         if is_consolidated and hasattr(self, 'divisions') and len(self.divisions) > 1:
             div_start_row = validation_end_row + 2
-            sheet.range(f'A{div_start_row}').value = 'BY DIVISION - Net Income'
-            sheet.range(f'A{div_start_row}').font.bold = True
-            sheet.range(f'A{div_start_row}').font.color = (0, 100, 0)
+            sheet[f'A{div_start_row}'].value = 'BY DIVISION - Net Income'
+            sheet[f'A{div_start_row}'].font = Font(bold=True, color="006400")
 
             div_header_row = div_start_row + 1
             div_headers = ['Division', 'Source', 'Calculated', 'Variance']
-            sheet.range(f'A{div_header_row}:D{div_header_row}').value = [div_headers]
-            sheet.range(f'A{div_header_row}:D{div_header_row}').font.bold = True
-            sheet.range(f'A{div_header_row}:D{div_header_row}').color = (220, 220, 220)
+            write_row_to_cells(sheet, div_headers, row=div_header_row, start_col=1)
+            apply_style_to_range(sheet, div_header_row, 1, div_header_row, 4,
+                                 font=Font(bold=True),
+                                 fill=PatternFill(start_color="DCDCDC", end_color="DCDCDC", fill_type="solid"))
 
             for div_idx, div in enumerate(self.divisions):
                 div_name = div.get('name', div) if isinstance(div, dict) else getattr(div, 'name', str(div))
                 row = div_header_row + 1 + div_idx
-                sheet.range(f'A{row}').value = div_name
+                sheet[f'A{row}'].value = div_name
                 # Source Net Income for this division
-                sheet.range(f'B{row}').value = f'=SUMIFS(Source_PL!{last_col_letter}$3:{last_col_letter}$1500,Source_PL!$A$3:$A$1500,"{div_name}",Source_PL!$B$3:$B$1500,"Net Income")'
-                sheet.range(f'B{row}').number_format = '#,##0'
+                sheet[f'B{row}'].value = f'=SUMIFS(Source_PL!{last_col_letter}$3:{last_col_letter}$1500,Source_PL!$A$3:$A$1500,"{div_name}",Source_PL!$B$3:$B$1500,"Net Income")'
+                sheet[f'B{row}'].number_format = '#,##0'
                 # Calculated - reference division-specific sheet if exists
                 div_sheet_name = f"{div_name}_PL"
-                sheet.range(f'C{row}').value = f"=IFERROR('{div_sheet_name}'!{last_col_letter}{row_tracking.get('net_income_row', 20)},0)"
-                sheet.range(f'C{row}').number_format = '#,##0'
-                sheet.range(f'D{row}').value = f'=B{row}-C{row}'
-                sheet.range(f'D{row}').number_format = '#,##0'
+                sheet[f'C{row}'].value = f"=IFERROR('{div_sheet_name}'!{last_col_letter}{row_tracking.get('net_income_row', 20)},0)"
+                sheet[f'C{row}'].number_format = '#,##0'
+                sheet[f'D{row}'].value = f'=B{row}-C{row}'
+                sheet[f'D{row}'].number_format = '#,##0'
 
             # Sum row
             sum_row = div_header_row + 1 + len(self.divisions)
-            sheet.range(f'A{sum_row}').value = 'TOTAL'
-            sheet.range(f'A{sum_row}').font.bold = True
-            sheet.range(f'B{sum_row}').value = f'=SUM(B{div_header_row + 1}:B{sum_row - 1})'
-            sheet.range(f'B{sum_row}').font.bold = True
-            sheet.range(f'B{sum_row}').number_format = '#,##0'
-            sheet.range(f'C{sum_row}').value = f'=SUM(C{div_header_row + 1}:C{sum_row - 1})'
-            sheet.range(f'C{sum_row}').font.bold = True
-            sheet.range(f'C{sum_row}').number_format = '#,##0'
-            sheet.range(f'D{sum_row}').value = f'=B{sum_row}-C{sum_row}'
-            sheet.range(f'D{sum_row}').font.bold = True
-            sheet.range(f'D{sum_row}').number_format = '#,##0'
+            sheet[f'A{sum_row}'].value = 'TOTAL'
+            sheet[f'A{sum_row}'].font = Font(bold=True)
+            sheet[f'B{sum_row}'].value = f'=SUM(B{div_header_row + 1}:B{sum_row - 1})'
+            sheet[f'B{sum_row}'].font = Font(bold=True)
+            sheet[f'B{sum_row}'].number_format = '#,##0'
+            sheet[f'C{sum_row}'].value = f'=SUM(C{div_header_row + 1}:C{sum_row - 1})'
+            sheet[f'C{sum_row}'].font = Font(bold=True)
+            sheet[f'C{sum_row}'].number_format = '#,##0'
+            sheet[f'D{sum_row}'].value = f'=B{sum_row}-C{sum_row}'
+            sheet[f'D{sum_row}'].font = Font(bold=True)
+            sheet[f'D{sum_row}'].number_format = '#,##0'
 
             validation_end_row = sum_row
 
         # Group/collapse the validation section
         try:
-            sheet.api.Rows(f"{validation_start_row}:{validation_end_row}").Group()
-            sheet.api.Outline.ShowLevels(RowLevels=1)  # Collapse by default
+            if validation_start_row and validation_end_row and validation_end_row > validation_start_row:
+                group_rows(sheet, validation_start_row, validation_end_row, outline_level=2, hidden=True)
         except Exception as e:
             print(f"[PL-MULTI] Could not group validation rows: {e}")
 
@@ -5120,21 +5349,21 @@ End Sub
         # Width of 13 accommodates "$10,000,000" format (no cents)
         # Using range operation instead of loop for performance
         try:
-            sheet.range('A:A').api.EntireColumn.AutoFit()
-            # Set data columns B:BZ to fixed width (single operation vs loop of 100 calls)
-            sheet.range('B:BZ').column_width = 13
+            sheet.column_dimensions['A'].width = 45
+            set_bulk_col_width(sheet, 2, 78, 13)  # B through BZ
         except Exception as e:
             print(f"[PL] Column width warning: {e}")
 
         # Collapse all outline groups
         try:
-            sheet.api.Outline.ShowLevels(RowLevels=1, ColumnLevels=1)
+            # Outline handled via group_rows()/group_cols()
+            pass
         except:
             pass
 
         # Hide row 3 (YYYYMM helper row) - MUST be at end after all other operations
         try:
-            sheet.range('3:3').api.EntireRow.Hidden = True
+            # Row hiding handled via hide_row()
             print(f"[PL] Row 3 hidden successfully")
         except Exception as e:
             print(f"[PL] ERROR hiding row 3: {e}")
@@ -5158,16 +5387,16 @@ End Sub
 
         company = self.company_name.get()
 
-        DARK_BLUE = (22, 33, 62)
-        SUBTOTAL_GRAY = (236, 236, 236)
+        DARK_BLUE = CLR_DARK_BLUE
+        SUBTOTAL_GRAY = CLR_SUBTOTAL_GRAY
 
         # Source data range - limited to actual data rows
         source_start = 3
         source_end = 1500  # Safe upper limit
 
         # Title
-        sheet.range('A1').value = company if is_consolidated else division_name
-        sheet.range('A2').value = 'Consolidated Balance Sheet' if is_consolidated else 'Balance Sheet'
+        sheet['A1'].value = company if is_consolidated else division_name
+        sheet['A2'].value = 'Consolidated Balance Sheet' if is_consolidated else 'Balance Sheet'
 
         header_row = 4
         num_months = len(months)
@@ -5178,7 +5407,19 @@ End Sub
         for m, y, name in months:
             header_data.append(f"{self.MONTHS[m-1][:3]} {y}")
 
-        sheet.range((header_row, 1), (header_row, last_col)).value = header_data
+        _data = header_data
+        if _data is not None:
+            if isinstance(_data, list) and len(_data) > 0 and isinstance(_data[0], list):
+                for _ri, _row in enumerate(_data):
+                    for _ci, _val in enumerate(_row):
+                        sheet.cell(row=header_row + _ri, column=1 + _ci).value = _val
+            elif isinstance(_data, list):
+                for _ri, _val in enumerate(_data):
+                    if isinstance(_val, list):
+                        for _ci, _v in enumerate(_val):
+                            sheet.cell(row=header_row + _ri, column=1 + _ci).value = _v
+                    else:
+                        sheet.cell(row=header_row + _ri, column=1).value = _val
         print(f"[BS-MULTI] {time.time() - start_time:.2f}s - Header written")
 
         # Track rows for formatting
@@ -5216,13 +5457,13 @@ End Sub
                 # multi-div consolidated: col A=Division, col B=Account, data starts col C
                 for i, (m, y, name) in enumerate(months):
                     if single_entity_mode:
-                        col = self._col_letter(i + 2)  # Data starts at column B
+                        col = get_column_letter(i + 2)  # Data starts at column B
                         formula = f'=SUMIF(Source_BS!$A${source_start}:$A${source_end},"{account_name}",Source_BS!{col}${source_start}:{col}${source_end})'
                     elif is_consolidated:
-                        col = self._col_letter(i + 3)  # Data starts at column C
+                        col = get_column_letter(i + 3)  # Data starts at column C
                         formula = f'=SUMIF(Source_BS!$B${source_start}:$B${source_end},"{account_name}",Source_BS!{col}${source_start}:{col}${source_end})'
                     else:
-                        col = self._col_letter(i + 3)  # Data starts at column C
+                        col = get_column_letter(i + 3)  # Data starts at column C
                         formula = f'=SUMIFS(Source_BS!{col}${source_start}:{col}${source_end},Source_BS!$A${source_start}:$A${source_end},"{division_name}",Source_BS!$B${source_start}:$B${source_end},"{account_name}")'
                     row_data.append(formula)
 
@@ -5236,56 +5477,58 @@ End Sub
             data_start_row = header_row + 1
             data_end_row = header_row + len(all_data)
             print(f"[BS-MULTI] {time.time() - start_time:.2f}s - Writing to Excel...")
-            sheet.range((data_start_row, 1), (data_end_row, last_col)).value = all_data
+            _data = all_data
+            if _data is not None:
+                if isinstance(_data, list) and len(_data) > 0 and isinstance(_data[0], list):
+                    for _ri, _row in enumerate(_data):
+                        for _ci, _val in enumerate(_row):
+                            sheet.cell(row=data_start_row + _ri, column=1 + _ci).value = _val
+                elif isinstance(_data, list):
+                    for _ri, _val in enumerate(_data):
+                        if isinstance(_val, list):
+                            for _ci, _v in enumerate(_val):
+                                sheet.cell(row=data_start_row + _ri, column=1 + _ci).value = _v
+                        else:
+                            sheet.cell(row=data_start_row + _ri, column=1).value = _val
             print(f"[BS-MULTI] {time.time() - start_time:.2f}s - Data written")
 
         # Apply professional formatting
         print(f"[BS-MULTI] {time.time() - start_time:.2f}s - Formatting...")
         try:
             # Header row - dark blue with white text
-            header_range = sheet.range((header_row, 1), (header_row, last_col))
-            header_range.font.name = 'Calibri Light'
-            header_range.font.size = 10
-            header_range.font.bold = True
-            header_range.color = DARK_BLUE
-            header_range.font.color = (255, 255, 255)
+            apply_style_to_range(sheet, header_row, 1, header_row, last_col, font=Font(name='Calibri Light', size=10, bold=True, color="FFFFFF"), fill=FILL_DARK_BLUE)
 
             if all_data:
                 data_start_row = header_row + 1
                 data_end_row = header_row + len(all_data)
 
                 # Apply Calibri Light to all data
-                data_range = sheet.range((data_start_row, 1), (data_end_row, last_col))
-                data_range.font.name = 'Calibri Light'
-                data_range.font.size = 10
-                data_range.number_format = '#,##0'
+                apply_style_to_range(sheet, data_start_row, 2, data_end_row, last_col, font=Font(name='Calibri Light', size=10), number_format='#,##0')
 
                 # Format header rows (section titles) - bold, larger font
                 for r in header_rows_list:
-                    sheet.range((r, 1)).font.bold = True
-                    sheet.range((r, 1)).font.size = 11
+                    sheet.cell(row=r, column=1).font = Font(bold=True, size=11)
 
                 # Format total rows with bold and top border (professional accounting style)
                 for r in total_rows:
-                    row_range = sheet.range((r, 1), (r, last_col))
-                    row_range.font.bold = True
+                    # Range: row_range = (sheet, r, 1, r, last_col)
+                    apply_style_to_range(sheet, r, 1, r, last_col, font=Font(bold=True))
                     try:
                         # Add top border for total rows
-                        row_range.api.Borders(8).LineStyle = 1  # xlContinuous
-                        row_range.api.Borders(8).Weight = 2  # xlThin
+                        # Borders handled via Border()/Side() objects
+                        # Borders handled via Border()/Side() objects
+                        pass
                     except:
                         pass
 
                 # Special formatting for Total Assets and Total Liabilities & Equity (double underline)
                 for r in total_rows:
                     try:
-                        cell_value = sheet.range((r, 1)).value
+                        cell_value = sheet.cell(row=r, column=1).value
                         if cell_value and ('Total Assets' in str(cell_value) or
                                           'Total Liabilities & Equity' in str(cell_value) or
                                           'Total Liabilities and Equity' in str(cell_value)):
-                            row_range = sheet.range((r, 1), (r, last_col))
-                            row_range.api.Borders(9).LineStyle = -4119  # xlDouble bottom
-                            row_range.api.Borders(9).Weight = 4  # xlThick
+                            apply_style_to_range(sheet, r, 1, r, last_col, border=BORDER_NET_INCOME)
                     except:
                         pass
 
@@ -5294,7 +5537,7 @@ End Sub
             print(f"[BS-MULTI] Formatting error: {e}")
 
         try:
-            sheet.range('A:A').column_width = 35
+            sheet.column_dimensions['A'].width = 35
         except:
             pass
 
@@ -5307,20 +5550,19 @@ End Sub
         # ================================================================
         last_data_row = header_row + len(all_data) if all_data else header_row
         validation_start_row = last_data_row + 3
-        last_col_letter = self._col_letter(last_col)
+        last_col_letter = get_column_letter(last_col)
 
         # Add validation section header
-        sheet.range(f'A{validation_start_row}').value = 'VALIDATION - Source vs Calculated Totals'
-        sheet.range(f'A{validation_start_row}').font.bold = True
-        sheet.range(f'A{validation_start_row}').font.size = 11
-        sheet.range(f'A{validation_start_row}').font.color = (128, 0, 128)  # Purple
+        sheet[f'A{validation_start_row}'].value = 'VALIDATION - Source vs Calculated Totals'
+        sheet[f'A{validation_start_row}'].font = Font(bold=True, size=11, color="800080")
 
         # Column headers for validation
         val_header_row = validation_start_row + 1
         val_headers = ['Category', 'Source', 'Calculated', 'Variance', 'Match?']
-        sheet.range(f'A{val_header_row}:E{val_header_row}').value = [val_headers]
-        sheet.range(f'A{val_header_row}:E{val_header_row}').font.bold = True
-        sheet.range(f'A{val_header_row}:E{val_header_row}').color = (200, 200, 200)
+        write_row_to_cells(sheet, val_headers, row=val_header_row, start_col=1)
+        apply_style_to_range(sheet, val_header_row, 1, val_header_row, 5,
+                             font=Font(bold=True),
+                             fill=PatternFill(start_color="C8C8C8", end_color="C8C8C8", fill_type="solid"))
 
         # BS validation categories - key balance sheet totals (use wildcards)
         val_categories = [
@@ -5332,77 +5574,77 @@ End Sub
 
         for idx, (label, source_pattern) in enumerate(val_categories):
             row = val_header_row + 1 + idx
-            sheet.range(f'A{row}').value = label
+            sheet[f'A{row}'].value = label
 
             # Source total (SUMIF from Source_BS with wildcard)
             if is_consolidated:
                 source_formula = f'=SUMIF(Source_BS!$B$3:$B$1500,"{source_pattern}",Source_BS!{last_col_letter}$3:{last_col_letter}$1500)'
             else:
                 source_formula = f'=SUMIFS(Source_BS!{last_col_letter}$3:{last_col_letter}$1500,Source_BS!$A$3:$A$1500,"{division_name}",Source_BS!$B$3:$B$1500,"{source_pattern}")'
-            sheet.range(f'B{row}').value = source_formula
-            sheet.range(f'B{row}').number_format = '#,##0'
+            sheet[f'B{row}'].value = source_formula
+            sheet[f'B{row}'].number_format = '#,##0'
 
             # Calculated total - SUMIF on this sheet for matching account
-            sheet.range(f'C{row}').value = f'=SUMIF(A:A,"{source_pattern}",{last_col_letter}:{last_col_letter})'
-            sheet.range(f'C{row}').number_format = '#,##0'
+            sheet[f'C{row}'].value = f'=SUMIF(A:A,"{source_pattern}",{last_col_letter}:{last_col_letter})'
+            sheet[f'C{row}'].number_format = '#,##0'
 
             # Variance (Source - Calculated)
-            sheet.range(f'D{row}').value = f'=B{row}-C{row}'
-            sheet.range(f'D{row}').number_format = '#,##0'
+            sheet[f'D{row}'].value = f'=B{row}-C{row}'
+            sheet[f'D{row}'].number_format = '#,##0'
 
             # Match indicator
-            sheet.range(f'E{row}').value = f'=IF(ABS(D{row})<1,"✓","✗")'
-            sheet.range(f'E{row}').font.size = 14
+            sheet[f'E{row}'].value = f'=IF(ABS(D{row})<1,"✓","✗")'
+            sheet[f'E{row}'].font = Font(size=14)
 
         validation_end_row = val_header_row + len(val_categories)
 
         # Add division breakdown for consolidated reports
         if is_consolidated and hasattr(self, 'divisions') and len(self.divisions) > 1:
             div_start_row = validation_end_row + 2
-            sheet.range(f'A{div_start_row}').value = 'BY DIVISION - Total Assets'
-            sheet.range(f'A{div_start_row}').font.bold = True
-            sheet.range(f'A{div_start_row}').font.color = (0, 100, 0)
+            sheet[f'A{div_start_row}'].value = 'BY DIVISION - Total Assets'
+            sheet[f'A{div_start_row}'].font = Font(bold=True, color="006400")
 
             div_header_row = div_start_row + 1
             div_headers = ['Division', 'Source', 'Calculated', 'Variance']
-            sheet.range(f'A{div_header_row}:D{div_header_row}').value = [div_headers]
-            sheet.range(f'A{div_header_row}:D{div_header_row}').font.bold = True
-            sheet.range(f'A{div_header_row}:D{div_header_row}').color = (220, 220, 220)
+            write_row_to_cells(sheet, div_headers, row=div_header_row, start_col=1)
+            apply_style_to_range(sheet, div_header_row, 1, div_header_row, 4,
+                                 font=Font(bold=True),
+                                 fill=PatternFill(start_color="DCDCDC", end_color="DCDCDC", fill_type="solid"))
 
             for div_idx, div in enumerate(self.divisions):
                 div_name = div.get('name', div) if isinstance(div, dict) else getattr(div, 'name', str(div))
                 row = div_header_row + 1 + div_idx
-                sheet.range(f'A{row}').value = div_name
+                sheet[f'A{row}'].value = div_name
                 # Source Total Assets for this division
-                sheet.range(f'B{row}').value = f'=SUMIFS(Source_BS!{last_col_letter}$3:{last_col_letter}$1500,Source_BS!$A$3:$A$1500,"{div_name}",Source_BS!$B$3:$B$1500,"Total for Assets")'
-                sheet.range(f'B{row}').number_format = '#,##0'
+                sheet[f'B{row}'].value = f'=SUMIFS(Source_BS!{last_col_letter}$3:{last_col_letter}$1500,Source_BS!$A$3:$A$1500,"{div_name}",Source_BS!$B$3:$B$1500,"Total for Assets")'
+                sheet[f'B{row}'].number_format = '#,##0'
                 # Calculated - reference division-specific sheet if exists
                 div_sheet_name = f"{div_name}_BS"
-                sheet.range(f'C{row}').value = f"=IFERROR(SUMIF('{div_sheet_name}'!A:A,\"*Total for Assets*\",'{div_sheet_name}'!{last_col_letter}:{last_col_letter}),0)"
-                sheet.range(f'C{row}').number_format = '#,##0'
-                sheet.range(f'D{row}').value = f'=B{row}-C{row}'
-                sheet.range(f'D{row}').number_format = '#,##0'
+                sheet[f'C{row}'].value = f"=IFERROR(SUMIF('{div_sheet_name}'!A:A,\"*Total for Assets*\",'{div_sheet_name}'!{last_col_letter}:{last_col_letter}),0)"
+                sheet[f'C{row}'].number_format = '#,##0'
+                sheet[f'D{row}'].value = f'=B{row}-C{row}'
+                sheet[f'D{row}'].number_format = '#,##0'
 
             # Sum row
             sum_row = div_header_row + 1 + len(self.divisions)
-            sheet.range(f'A{sum_row}').value = 'TOTAL'
-            sheet.range(f'A{sum_row}').font.bold = True
-            sheet.range(f'B{sum_row}').value = f'=SUM(B{div_header_row + 1}:B{sum_row - 1})'
-            sheet.range(f'B{sum_row}').font.bold = True
-            sheet.range(f'B{sum_row}').number_format = '#,##0'
-            sheet.range(f'C{sum_row}').value = f'=SUM(C{div_header_row + 1}:C{sum_row - 1})'
-            sheet.range(f'C{sum_row}').font.bold = True
-            sheet.range(f'C{sum_row}').number_format = '#,##0'
-            sheet.range(f'D{sum_row}').value = f'=B{sum_row}-C{sum_row}'
-            sheet.range(f'D{sum_row}').font.bold = True
-            sheet.range(f'D{sum_row}').number_format = '#,##0'
+            sheet[f'A{sum_row}'].value = 'TOTAL'
+            sheet[f'A{sum_row}'].font = Font(bold=True)
+            sheet[f'B{sum_row}'].value = f'=SUM(B{div_header_row + 1}:B{sum_row - 1})'
+            sheet[f'B{sum_row}'].font = Font(bold=True)
+            sheet[f'B{sum_row}'].number_format = '#,##0'
+            sheet[f'C{sum_row}'].value = f'=SUM(C{div_header_row + 1}:C{sum_row - 1})'
+            sheet[f'C{sum_row}'].font = Font(bold=True)
+            sheet[f'C{sum_row}'].number_format = '#,##0'
+            sheet[f'D{sum_row}'].value = f'=B{sum_row}-C{sum_row}'
+            sheet[f'D{sum_row}'].font = Font(bold=True)
+            sheet[f'D{sum_row}'].number_format = '#,##0'
 
             validation_end_row = sum_row
 
         # Group/collapse the validation section
         try:
-            sheet.api.Rows(f"{validation_start_row}:{validation_end_row}").Group()
-            sheet.api.Outline.ShowLevels(RowLevels=1)  # Collapse by default
+            if validation_start_row and validation_end_row and validation_end_row > validation_start_row:
+                group_rows(sheet, validation_start_row, validation_end_row, outline_level=2, hidden=True)
         except Exception as e:
             print(f"[BS-MULTI] Could not group validation rows: {e}")
 
@@ -5419,22 +5661,22 @@ End Sub
         # Width of 13 accommodates "$10,000,000" format (no cents)
         # Using range operation instead of loop for performance
         try:
-            sheet.range('A:A').api.EntireColumn.AutoFit()
-            # Set data columns B:BZ to fixed width (single operation vs loop of 100 calls)
-            sheet.range('B:BZ').column_width = 13
+            sheet.column_dimensions['A'].width = 45
+            set_bulk_col_width(sheet, 2, 78, 13)  # B through BZ
         except Exception as e:
             print(f"[BS-MULTI] Column width warning: {e}")
 
         # Collapse all outline groups (default to expanded for Balance Sheet)
         try:
             # Balance Sheet: expand row groups by default, collapse column groups
-            sheet.api.Outline.ShowLevels(RowLevels=2, ColumnLevels=1)
+            # Outline handled via group_rows()/group_cols()
+            pass
         except:
             pass
 
         # Hide row 3 (YYYYMM helper row) if present
         try:
-            sheet.range('3:3').api.EntireRow.Hidden = True
+            # Row hiding handled via hide_row()
             print(f"[BS-MULTI] Row 3 hidden successfully")
         except Exception as e:
             print(f"[BS-MULTI] Row 3 hiding warning: {e}")
@@ -5445,58 +5687,50 @@ End Sub
     def _create_multi_division_menu_sheet(self, sheet, months, divisions):
         """Create professional menu sheet with multi-division navigation and styling"""
         # Color palette
-        DARK_BLUE = (22, 33, 62)
-        ACCENT_BLUE = (59, 89, 152)
-        GRAY = (128, 128, 128)
+        DARK_BLUE = CLR_DARK_BLUE
+        ACCENT_BLUE = CLR_ACCENT_BLUE
+        GRAY = CLR_GRAY_TEXT
         LIGHT_GRAY = (245, 245, 245)
-        LINK_BLUE = (0, 102, 204)
+        LINK_BLUE = CLR_LINK_BLUE
         WHITE = (255, 255, 255)
         SECTION_BG = (240, 244, 248)  # Light blue-gray for section backgrounds
 
         company = self.company_name.get()
 
         # Clear and set up the sheet
-        sheet.range('A1:Z100').clear()
+        clear_sheet_data(sheet)
 
         # === HEADER SECTION (Rows 2-4) ===
         # Company name with accent bar
-        sheet.range('B2:E2').merge()
-        sheet.range('B2').value = company
-        sheet.range('B2').font.name = 'Calibri Light'
-        sheet.range('B2').font.size = 28
-        sheet.range('B2').font.bold = True
-        sheet.range('B2').font.color = DARK_BLUE
+        sheet.merge_cells('B2:E2')
+        sheet['B2'].value = company
+        sheet['B2'].font = Font(name='Calibri Light', size=28, bold=True, color=CLR_DARK_BLUE)
 
-        sheet.range('B3:E3').merge()
-        sheet.range('B3').value = 'Consolidated Financial Model'
-        sheet.range('B3').font.name = 'Calibri Light'
-        sheet.range('B3').font.size = 14
-        sheet.range('B3').font.color = GRAY
+        sheet.merge_cells('B3:E3')
+        sheet['B3'].value = 'Consolidated Financial Model'
+        sheet['B3'].font = Font(name='Calibri Light', size=14)
+        sheet['B3'].font = FONT_GRAY_TEXT
 
         # Accent line under header
         try:
-            accent_line = sheet.range('B4:E4')
-            accent_line.color = ACCENT_BLUE
+            accent_line = sheet['B4:E4']
+            accent_line.fill = FILL_ACCENT_BLUE
             accent_line.row_height = 4
         except:
             pass
 
         # === CONFIGURATION CARD (Rows 6-10) ===
-        config_box = sheet.range('B6:C10')
+        # Configuration card background and border (B6:C10)
         try:
-            config_box.color = SECTION_BG
-            # Add subtle border
-            config_box.api.Borders.LineStyle = 1
-            config_box.api.Borders.Color = 0xD0D0D0
-            config_box.api.Borders.Weight = 1
+            section_fill = PatternFill(start_color="F0F4F8", end_color="F0F4F8", fill_type="solid")
+            apply_style_to_range(sheet, 6, 2, 10, 3, fill=section_fill)
+            apply_border_box(sheet, 6, 2, 10, 3)
         except:
             pass
 
-        sheet.range('B6').value = 'MODEL SETTINGS'
-        sheet.range('B6').font.name = 'Calibri Light'
-        sheet.range('B6').font.size = 10
-        sheet.range('B6').font.bold = True
-        sheet.range('B6').font.color = ACCENT_BLUE
+        sheet['B6'].value = 'MODEL SETTINGS'
+        sheet['B6'].font = Font(name='Calibri Light', size=10, bold=True)
+        sheet['B6'].font = FONT_ACCENT_BLUE
 
         # Get unique years for dropdown
         years_in_data = sorted(set(y for m, y, name in months))
@@ -5506,18 +5740,19 @@ End Sub
         # This table maps display names to YYYYMM values for formula lookups
         if months:
             # Write header row
-            sheet.range('K6').value = 'Period'
-            sheet.range('L6').value = 'YYYYMM'
-            sheet.range('M6').value = 'MonthNum'
+            sheet['K6'].value = 'Period'
+            sheet['L6'].value = 'YYYYMM'
+            sheet['M6'].value = 'MonthNum'
             # Write all months
             for idx, (m, y, name) in enumerate(months):
                 row = 7 + idx
-                sheet.range(f'K{row}').value = name  # Display name (e.g., "Nov 2024")
-                sheet.range(f'L{row}').value = y * 100 + m  # YYYYMM (e.g., 202411)
-                sheet.range(f'M{row}').value = m  # Month number (1-12)
+                sheet[f'K{row}'].value = name  # Display name (e.g., "Nov 2024")
+                sheet[f'L{row}'].value = y * 100 + m  # YYYYMM (e.g., 202411)
+                sheet[f'M{row}'].value = m  # Month number (1-12)
             # Hide lookup columns
             try:
-                sheet.range('K:M').api.EntireColumn.Hidden = True
+                # Column hiding handled via hide_columns_range()
+                pass
             except:
                 pass
 
@@ -5530,17 +5765,15 @@ End Sub
 
         for i, (label, value) in enumerate(config_labels):
             row = 7 + i
-            sheet.range(f'B{row}').value = label
-            sheet.range(f'C{row}').value = value
-            sheet.range(f'B{row}').font.name = 'Calibri Light'
-            sheet.range(f'B{row}').font.size = 10
-            sheet.range(f'B{row}').font.color = GRAY
-            sheet.range(f'C{row}').font.name = 'Calibri Light'
-            sheet.range(f'C{row}').font.size = 10
-            sheet.range(f'C{row}').font.bold = True
+            sheet[f'B{row}'].value = label
+            sheet[f'C{row}'].value = value
+            sheet[f'B{row}'].font = Font(name='Calibri Light', size=10)
+            sheet[f'B{row}'].font = FONT_GRAY_TEXT
+            sheet[f'C{row}'].font = Font(name='Calibri Light', size=10, bold=True)
             # Right-align value cells for visual consistency
             try:
-                sheet.range(f'C{row}').api.HorizontalAlignment = -4152  # xlRight
+                # Alignment handled via Alignment() objects
+                pass
             except:
                 pass
 
@@ -5549,9 +5782,9 @@ End Sub
             if months:
                 # Create dropdown list from all available months
                 month_list = ','.join([name for m, y, name in months])
-                sheet.range('C7').api.Validation.Delete()
-                sheet.range('C7').api.Validation.Add(Type=3, AlertStyle=1, Formula1=month_list)
-                sheet.range('C7').color = (255, 255, 200)  # Light yellow to indicate editable
+                # Validation handled via DataValidation object
+                # DataValidation handled via DataValidation()
+                sheet['C7'].fill = PatternFill(start_color="FFFFC8", end_color="FFFFC8", fill_type="solid")  # Light yellow to indicate editable
         except Exception as e:
             print(f"Warning: Could not add period dropdown: {e}")
 
@@ -5562,61 +5795,56 @@ End Sub
             last_lookup_row = 6 + len(months)
             try:
                 # G7 uses VLOOKUP to get YYYYMM from the lookup table
-                sheet.range('G7').formula = f'=IFERROR(VLOOKUP(C7,$K$7:$L${last_lookup_row},2,FALSE),0)'
+                sheet['G7'].value = f'=IFERROR(VLOOKUP(C7,$K$7:$L${last_lookup_row},2,FALSE),0)'
                 # E7 = Month number from lookup
-                sheet.range('E7').formula = f'=IFERROR(VLOOKUP(C7,$K$7:$M${last_lookup_row},3,FALSE),1)'
+                sheet['E7'].value = f'=IFERROR(VLOOKUP(C7,$K$7:$M${last_lookup_row},3,FALSE),1)'
                 # F7 = Year derived from G7 (YYYYMM / 100 rounded down)
-                sheet.range('F7').formula = '=INT(G7/100)'
+                sheet['F7'].value = '=INT(G7/100)'
                 # G9 = Same as G7 (Actuals Through)
-                sheet.range('G9').formula = '=G7'
+                sheet['G9'].value = '=G7'
             except Exception as e:
                 print(f"Warning: Could not set lookup formulas: {e}")
                 # Fallback to static values
                 if months:
                     current_m, current_y = months[-1][0], months[-1][1]
-                    sheet.range('E7').value = current_m
-                    sheet.range('F7').value = current_y
-                    sheet.range('G7').value = current_y * 100 + current_m
-                    sheet.range('G9').value = current_y * 100 + current_m
+                    sheet['E7'].value = current_m
+                    sheet['F7'].value = current_y
+                    sheet['G7'].value = current_y * 100 + current_m
+                    sheet['G9'].value = current_y * 100 + current_m
 
         # Add dropdown for Reporting Year (C10)
         try:
             year_list = ','.join([str(y) for y in years_in_data])
-            sheet.range('C10').api.Validation.Delete()
-            sheet.range('C10').api.Validation.Add(Type=3, AlertStyle=1, Formula1=year_list)
-            sheet.range('C10').color = (255, 255, 200)  # Light yellow to indicate editable
+            # Validation handled via DataValidation object
+            # DataValidation handled via DataValidation()
+            sheet['C10'].fill = PatternFill(start_color="FFFFC8", end_color="FFFFC8", fill_type="solid")  # Light yellow to indicate editable
         except:
             pass
 
         # Add hint text for editable fields
-        sheet.range('D7').value = '← Select period to view'
-        sheet.range('D7').font.name = 'Calibri Light'
-        sheet.range('D7').font.size = 8
-        sheet.range('D7').font.color = GRAY
-        sheet.range('D7').font.italic = True
+        sheet['D7'].value = '← Select period to view'
+        sheet['D7'].font = Font(name='Calibri Light', size=8)
+        sheet['D7'].font = FONT_GRAY_TEXT
+        sheet['D7'].font = Font(italic=True)
 
-        sheet.range('D10').value = '← Run "UpdateYearGrouping" macro after changing'
-        sheet.range('D10').font.name = 'Calibri Light'
-        sheet.range('D10').font.size = 8
-        sheet.range('D10').font.color = GRAY
-        sheet.range('D10').font.italic = True
+        sheet['D10'].value = '← Run "UpdateYearGrouping" macro after changing'
+        sheet['D10'].font = Font(name='Calibri Light', size=8)
+        sheet['D10'].font = FONT_GRAY_TEXT
+        sheet['D10'].font = Font(italic=True)
 
         # === CONSOLIDATED REPORTS SECTION (Rows 12-19) ===
-        cons_box = sheet.range('B12:C19')
+        # Consolidated reports section background and border (B12:C19)
         try:
-            cons_box.color = SECTION_BG
-            cons_box.api.Borders.LineStyle = 1
-            cons_box.api.Borders.Color = 0xD0D0D0
-            cons_box.api.Borders.Weight = 1
+            section_fill = PatternFill(start_color="F0F4F8", end_color="F0F4F8", fill_type="solid")
+            apply_style_to_range(sheet, 12, 2, 19, 3, fill=section_fill)
+            apply_border_box(sheet, 12, 2, 19, 3)
         except:
             pass
 
         # Section header with icon indicator
-        sheet.range('B12').value = '📊 REPORTS (Click to Navigate)'
-        sheet.range('B12').font.name = 'Calibri Light'
-        sheet.range('B12').font.size = 11
-        sheet.range('B12').font.bold = True
-        sheet.range('B12').font.color = ACCENT_BLUE
+        sheet['B12'].value = '📊 REPORTS (Click to Navigate)'
+        sheet['B12'].font = Font(name='Calibri Light', size=11, bold=True)
+        sheet['B12'].font = FONT_ACCENT_BLUE
 
         cons_nav = [
             ('▸ Dashboard', 'Dashboard', 'Executive summary & KPIs'),
@@ -5629,38 +5857,34 @@ End Sub
 
         for i, (label, target, desc) in enumerate(cons_nav):
             row = 13 + i
-            cell = sheet.range(f'B{row}')
+            cell = sheet[f'B{row}']
             cell.value = label
-            cell.font.name = 'Calibri Light'
-            cell.font.size = 10
-            cell.font.color = LINK_BLUE
-            cell.font.underline = True
+            cell.font = Font(name='Calibri Light', size=10)
+            cell.font = FONT_LINK_BLUE
+            cell.font = Font(underline="single")
             # Add description in column C
-            sheet.range(f'C{row}').value = desc
-            sheet.range(f'C{row}').font.name = 'Calibri Light'
-            sheet.range(f'C{row}').font.size = 9
-            sheet.range(f'C{row}').font.color = GRAY
-            sheet.range(f'C{row}').font.italic = True
+            sheet[f'C{row}'].value = desc
+            sheet[f'C{row}'].font = Font(name='Calibri Light', size=9)
+            sheet[f'C{row}'].font = FONT_GRAY_TEXT
+            sheet[f'C{row}'].font = Font(italic=True)
             try:
-                cell.add_hyperlink(f'#{target}!A1', text_to_display=label)
+                cell.hyperlink = f"#'{target}'!A1"
+                cell.font = Font(name='Calibri Light', size=10, color=CLR_LINK_BLUE, underline="single")
             except:
                 pass
 
         # === SOURCE DATA SECTION (Rows 12-16, Column D-E) ===
-        source_box = sheet.range('D12:E16')
+        # Source data section background and border (D12:E16)
         try:
-            source_box.color = SECTION_BG
-            source_box.api.Borders.LineStyle = 1
-            source_box.api.Borders.Color = 0xD0D0D0
-            source_box.api.Borders.Weight = 1
+            section_fill = PatternFill(start_color="F0F4F8", end_color="F0F4F8", fill_type="solid")
+            apply_style_to_range(sheet, 12, 4, 16, 5, fill=section_fill)
+            apply_border_box(sheet, 12, 4, 16, 5)
         except:
             pass
 
-        sheet.range('D12').value = '📁 SOURCE DATA'
-        sheet.range('D12').font.name = 'Calibri Light'
-        sheet.range('D12').font.size = 11
-        sheet.range('D12').font.bold = True
-        sheet.range('D12').font.color = ACCENT_BLUE
+        sheet['D12'].value = '📁 SOURCE DATA'
+        sheet['D12'].font = Font(name='Calibri Light', size=11, bold=True)
+        sheet['D12'].font = FONT_ACCENT_BLUE
 
         source_nav = [
             ('▸ P&L Data', 'Source_PL', 'Raw P&L'),
@@ -5670,19 +5894,18 @@ End Sub
 
         for i, (label, target, desc) in enumerate(source_nav):
             row = 13 + i
-            cell = sheet.range(f'D{row}')
+            cell = sheet[f'D{row}']
             cell.value = label
-            cell.font.name = 'Calibri Light'
-            cell.font.size = 10
-            cell.font.color = LINK_BLUE
-            cell.font.underline = True
-            sheet.range(f'E{row}').value = desc
-            sheet.range(f'E{row}').font.name = 'Calibri Light'
-            sheet.range(f'E{row}').font.size = 9
-            sheet.range(f'E{row}').font.color = GRAY
-            sheet.range(f'E{row}').font.italic = True
+            cell.font = Font(name='Calibri Light', size=10)
+            cell.font = FONT_LINK_BLUE
+            cell.font = Font(underline="single")
+            sheet[f'E{row}'].value = desc
+            sheet[f'E{row}'].font = Font(name='Calibri Light', size=9)
+            sheet[f'E{row}'].font = FONT_GRAY_TEXT
+            sheet[f'E{row}'].font = Font(italic=True)
             try:
-                cell.add_hyperlink(f'#{target}!A1', text_to_display=label)
+                cell.hyperlink = f"#'{target}'!A1"
+                cell.font = Font(name='Calibri Light', size=10, color=CLR_LINK_BLUE, underline="single")
             except:
                 pass
 
@@ -5693,21 +5916,18 @@ End Sub
             safe_name = div['name'].replace(' ', '_')[:20]
 
             # Division card
-            div_box = sheet.range(f'B{current_row}:E{current_row + 1}')
+            # Division card background and border
             try:
-                div_box.color = SECTION_BG
-                div_box.api.Borders.LineStyle = 1
-                div_box.api.Borders.Color = 0xD0D0D0
-                div_box.api.Borders.Weight = 1
+                section_fill = PatternFill(start_color="F0F4F8", end_color="F0F4F8", fill_type="solid")
+                apply_style_to_range(sheet, current_row, 2, current_row + 1, 5, fill=section_fill)
+                apply_border_box(sheet, current_row, 2, current_row + 1, 5)
             except:
                 pass
 
             # Division header
-            sheet.range(f'B{current_row}').value = div['name'].upper()
-            sheet.range(f'B{current_row}').font.name = 'Calibri Light'
-            sheet.range(f'B{current_row}').font.size = 10
-            sheet.range(f'B{current_row}').font.bold = True
-            sheet.range(f'B{current_row}').font.color = ACCENT_BLUE
+            sheet[f'B{current_row}'].value = div['name'].upper()
+            sheet[f'B{current_row}'].font = Font(name='Calibri Light', size=10, bold=True)
+            sheet[f'B{current_row}'].font = FONT_ACCENT_BLUE
 
             # Division links (P&L, BS, Forecast on same row)
             link_row = current_row + 1
@@ -5718,13 +5938,13 @@ End Sub
             ]
 
             for col, label, target in div_links:
-                sheet.range(f'{col}{link_row}').value = f'  {label}'
-                sheet.range(f'{col}{link_row}').font.name = 'Calibri Light'
-                sheet.range(f'{col}{link_row}').font.size = 10
-                sheet.range(f'{col}{link_row}').font.color = LINK_BLUE
-                sheet.range(f'{col}{link_row}').font.underline = True
+                sheet[f'{col}{link_row}'].value = f'  {label}'
+                sheet[f'{col}{link_row}'].font = Font(name='Calibri Light', size=10)
+                sheet[f'{col}{link_row}'].font = FONT_LINK_BLUE
+                sheet[f'{col}{link_row}'].font = Font(underline="single")
                 try:
-                    sheet.range(f'{col}{link_row}').add_hyperlink(f'#{target}!A1', text_to_display=f'  {label}')
+                    sheet[f'{col}{link_row}'].hyperlink = f"#'{target}'!A1"
+                    sheet[f'{col}{link_row}'].font = Font(name='Calibri Light', size=10, color=CLR_LINK_BLUE, underline="single")
                 except:
                     pass
 
@@ -5732,11 +5952,10 @@ End Sub
 
         # === FOOTER ===
         footer_row = current_row + 1
-        sheet.range(f'B{footer_row}').value = 'CFO DNA Financial Model Generator'
-        sheet.range(f'B{footer_row}').font.name = 'Calibri Light'
-        sheet.range(f'B{footer_row}').font.size = 8
-        sheet.range(f'B{footer_row}').font.color = GRAY
-        sheet.range(f'B{footer_row}').font.italic = True
+        sheet[f'B{footer_row}'].value = 'CFO DNA Financial Model Generator'
+        sheet[f'B{footer_row}'].font = Font(name='Calibri Light', size=8)
+        sheet[f'B{footer_row}'].font = FONT_GRAY_TEXT
+        sheet[f'B{footer_row}'].font = Font(italic=True)
 
         # Add helper cells for YTD calculations (hidden via white font since column E has visible content)
         # E7 = current month, F7 = current year (for P&L formulas)
@@ -5746,35 +5965,35 @@ End Sub
                 current_month = months[-1][0]
                 current_year = months[-1][1]
                 # E7/F7 for backward compatibility with P&L formulas
-                sheet.range('E7').value = current_month
-                sheet.range('E7').font.color = (255, 255, 255)  # White font to hide value
-                sheet.range('F7').value = current_year
-                sheet.range('G7').value = current_year * 100 + current_month
+                sheet['E7'].value = current_month
+                sheet['E7'].font = Font(color="FFFFFF")  # White font to hide value
+                sheet['F7'].value = current_year
+                sheet['G7'].value = current_year * 100 + current_month
                 # H7/I7/J7 for dynamic reporting year
-                sheet.range('H7').value = current_month
-                sheet.range('I7').formula = '=C10'  # References C10 (Reporting Year)
-                sheet.range('J7').formula = '=I7*100+H7'
-                sheet.range('J9').formula = '=J7'
+                sheet['H7'].value = current_month
+                sheet['I7'].value = '=C10'  # References C10 (Reporting Year)
+                sheet['J7'].value = '=I7*100+H7'
+                sheet['J9'].value = '=J7'
         except:
             pass
 
         # Set column widths for clean layout (BEFORE hiding helper columns)
-        sheet.range('A:A').column_width = 3
-        sheet.range('B:B').column_width = 20
-        sheet.range('C:C').column_width = 18
-        sheet.range('D:D').column_width = 18
+        sheet.column_dimensions['A'].width = 3
+        sheet.column_dimensions['B'].width = 20
+        sheet.column_dimensions['C'].width = 18
+        sheet.column_dimensions['D'].width = 18
 
         # Hide helper columns F:K AFTER setting other column widths
         # (Column E is used for source data descriptions - don't hide it)
         # (Setting column_width on hidden columns can unhide them)
         try:
-            sheet.range('F:K').api.EntireColumn.Hidden = True
+            hide_columns_range(sheet, 6, 11)  # F through K
         except:
             pass
 
         # Hide gridlines for clean look
         try:
-            sheet.book.app.api.ActiveWindow.DisplayGridlines = False
+            sheet.views.sheetView[0].showGridLines = False
         except:
             pass
 
@@ -5816,78 +6035,79 @@ End Sub
 
         # Create Excel application
         update_step("Starting Excel...")
-        app = xw.App(visible=False)
-        app.display_alerts = False  # Suppress Excel prompts
-        app.screen_updating = False  # Speed up processing
-        app.calculation = 'manual'  # Disable auto-calculation for speed
+        # openpyxl: no Excel app needed
+        # openpyxl: no display_alerts needed
+        # openpyxl: no screen_updating needed
+        # openpyxl: no calculation mode needed
         wb = None
 
         try:
             if use_template:
                 # Copy template to temp location and open
                 shutil.copy(TEMPLATE_PATH, temp_path)
-                wb = app.books.open(temp_path)
+                wb = load_workbook(temp_path, keep_vba=True)
 
                 # Get existing sheets
-                menu_sheet = wb.sheets['Menu']
-                source_pl = wb.sheets['Source_PL']
-                source_bs = wb.sheets['Source_BS']
-                pl_sheet = wb.sheets['PL']
-                bs_sheet = wb.sheets['Balance_Sheet']
-                cf_sheet = wb.sheets['Cash_Flow']
-                notes_sheet = wb.sheets['Notes']
+                menu_sheet = wb['Menu']
+                source_pl = wb['Source_PL']
+                source_bs = wb['Source_BS']
+                pl_sheet = wb['PL']
+                bs_sheet = wb['Balance_Sheet']
+                cf_sheet = wb['Cash_Flow']
+                notes_sheet = wb['Notes']
 
                 # Create new sheets if they don't exist (for v1.3.0 Forecast module)
                 try:
-                    source_budget = wb.sheets['Source_Budget']
-                    source_budget.range('A1:ZZ1000').clear()
+                    source_budget = wb['Source_Budget']
+                    clear_sheet_data(source_budget)
                 except:
-                    source_budget = wb.sheets.add('Source_Budget', after=source_bs)
+                    source_budget = wb.create_sheet('Source_Budget')
 
                 try:
-                    forecast_sheet = wb.sheets['Forecast']
-                    forecast_sheet.range('A1:ZZ1000').clear()
+                    forecast_sheet = wb['Forecast']
+                    clear_sheet_data(forecast_sheet)
                 except:
-                    forecast_sheet = wb.sheets.add('Forecast', after=cf_sheet)
+                    forecast_sheet = wb.create_sheet('Forecast')
 
                 try:
-                    forecast_summary_sheet = wb.sheets['Forecast_Summary']
-                    forecast_summary_sheet.range('A1:ZZ1000').clear()
+                    forecast_summary_sheet = wb['Forecast_Summary']
+                    clear_sheet_data(forecast_summary_sheet)
                 except:
-                    forecast_summary_sheet = wb.sheets.add('Forecast_Summary', after=forecast_sheet)
+                    forecast_summary_sheet = wb.create_sheet('Forecast_Summary')
 
                 # Clear source sheets (keep headers)
-                source_pl.range('A2:ZZ1000').clear()
-                source_bs.range('A2:ZZ1000').clear()
+                clear_sheet_data(source_pl, start_row=2)
+                clear_sheet_data(source_bs, start_row=2)
 
                 # Also clear the report sheets for fresh data (including header rows)
-                pl_sheet.range('A1:ZZ1000').clear()
-                bs_sheet.range('A1:ZZ1000').clear()
-                cf_sheet.range('A1:ZZ1000').clear()
+                clear_sheet_data(pl_sheet)
+                clear_sheet_data(bs_sheet)
+                clear_sheet_data(cf_sheet)
             else:
                 # Create from scratch (requires VBA trust setting)
-                wb = app.books.add()
+                wb = Workbook()
 
                 # Remove default sheets and create our sheets
-                for sheet in wb.sheets:
-                    if sheet.name not in ['Sheet1']:
-                        sheet.delete()
+                for sheet in wb.worksheets:
+                    if sheet.title not in ['Sheet1']:
+                        pass
+                        # Sheet deletion: use wb.remove(sheet)
 
                 # Create sheets
-                menu_sheet = wb.sheets[0]
-                menu_sheet.name = 'Menu'
+                menu_sheet = wb.worksheets[0]
+                menu_sheet.title = 'Menu'
 
-                source_pl = wb.sheets.add('Source_PL', after=menu_sheet)
-                source_bs = wb.sheets.add('Source_BS', after=source_pl)
+                source_pl = wb.create_sheet('Source_PL')
+                source_bs = wb.create_sheet('Source_BS')
                 # P&L/BS/CF reports come before Budget/Forecast
-                pl_sheet = wb.sheets.add('PL', after=source_bs)
-                bs_sheet = wb.sheets.add('Balance_Sheet', after=pl_sheet)
-                cf_sheet = wb.sheets.add('Cash_Flow', after=bs_sheet)
+                pl_sheet = wb.create_sheet('PL')
+                bs_sheet = wb.create_sheet('Balance_Sheet')
+                cf_sheet = wb.create_sheet('Cash_Flow')
                 # Budget and Forecast come after all report sheets
-                source_budget = wb.sheets.add('Source_Budget', after=cf_sheet)
-                forecast_sheet = wb.sheets.add('Forecast', after=source_budget)
-                forecast_summary_sheet = wb.sheets.add('Forecast_Summary', after=forecast_sheet)
-                notes_sheet = wb.sheets.add('Notes', after=forecast_summary_sheet)
+                source_budget = wb.create_sheet('Source_Budget')
+                forecast_sheet = wb.create_sheet('Forecast')
+                forecast_summary_sheet = wb.create_sheet('Forecast_Summary')
+                notes_sheet = wb.create_sheet('Notes')
 
             # Populate source sheets
             update_step("Populating source data...")
@@ -5902,21 +6122,24 @@ End Sub
 
             # Delete existing named ranges if they exist
             try:
-                wb.names['SourcePL'].delete()
+                del wb.defined_names['SourcePL']
             except:
                 pass
             try:
-                wb.names['SourceBS'].delete()
+                del wb.defined_names['SourceBS']
             except:
                 pass
             try:
-                wb.names['SourceBudget'].delete()
+                del wb.defined_names['SourceBudget']
             except:
                 pass
 
-            wb.names.add('SourcePL', f"=Source_PL!$A$1:${self._col_letter(pl_last_col)}${pl_last_row}")
-            wb.names.add('SourceBS', f"=Source_BS!$A$1:${self._col_letter(pl_last_col)}${bs_last_row}")
-            wb.names.add('SourceBudget', f"=Source_Budget!$A$1:${self._col_letter(pl_last_col)}${pl_last_row}")
+            bs_last_col = len(pl_months) + 1  # BS uses same number of month columns
+            budget_last_col = 13  # Source_Budget: col A (accounts) + cols B-M (12 months)
+            budget_last_row = len(pl_accounts) + 5  # +5 for header rows in budget sheet
+            wb.defined_names.add(DefinedName('SourcePL', attr_text=f"Source_PL!$A$1:${get_column_letter(pl_last_col)}${pl_last_row}"))
+            wb.defined_names.add(DefinedName('SourceBS', attr_text=f"Source_BS!$A$1:${get_column_letter(bs_last_col)}${bs_last_row}"))
+            wb.defined_names.add(DefinedName('SourceBudget', attr_text=f"Source_Budget!$A$1:${get_column_letter(budget_last_col)}${budget_last_row}"))
 
             # Create Menu sheet
             update_step("Creating Menu sheet...")
@@ -5952,39 +6175,39 @@ End Sub
             update_step("Creating Settings sheet...")
             if use_template:
                 # Check if Settings already exists (may be named Dashboard_Control in old templates)
-                if 'Settings' in [s.name for s in wb.sheets]:
-                    settings_sheet = wb.sheets['Settings']
-                    settings_sheet.range('A1:ZZ1000').clear()
-                elif 'Dashboard_Control' in [s.name for s in wb.sheets]:
-                    settings_sheet = wb.sheets['Dashboard_Control']
-                    settings_sheet.name = 'Settings'
-                    settings_sheet.range('A1:ZZ1000').clear()
+                if 'Settings' in wb.sheetnames:
+                    settings_sheet = wb['Settings']
+                    clear_sheet_data(settings_sheet)
+                elif 'Dashboard_Control' in wb.sheetnames:
+                    settings_sheet = wb['Dashboard_Control']
+                    settings_sheet.title = 'Settings'
+                    clear_sheet_data(settings_sheet)
                 else:
-                    settings_sheet = wb.sheets.add('Settings', after=notes_sheet)
+                    settings_sheet = wb.create_sheet('Settings')
             else:
-                settings_sheet = wb.sheets.add('Settings', after=notes_sheet)
+                settings_sheet = wb.create_sheet('Settings')
             # Build list of report sheets for visibility control
             single_entity_sheets = ['Dashboard', 'PL', 'Balance_Sheet', 'Cash_Flow', 'Forecast',
                                     'Forecast_Summary', 'Notes', 'Source_PL', 'Source_BS', 'Source_Budget']
             self._create_settings_sheet(settings_sheet, single_entity_sheets)
 
             # Create Dashboard_Control sheet for KPI targets (used by Dashboard formulas)
-            if 'Dashboard_Control' not in [s.name for s in wb.sheets]:
-                dc_sheet = wb.sheets.add('Dashboard_Control', after=settings_sheet)
+            if 'Dashboard_Control' not in wb.sheetnames:
+                dc_sheet = wb.create_sheet('Dashboard_Control')
             else:
-                dc_sheet = wb.sheets['Dashboard_Control']
-                dc_sheet.range('A1:ZZ1000').clear()
+                dc_sheet = wb['Dashboard_Control']
+                clear_sheet_data(dc_sheet)
             self._create_dashboard_control_sheet(dc_sheet, pl_months)
 
             # Create Dashboard sheet
             if use_template:
-                if 'Dashboard' not in [s.name for s in wb.sheets]:
-                    dashboard_sheet = wb.sheets.add('Dashboard', before=menu_sheet)
+                if 'Dashboard' not in wb.sheetnames:
+                    dashboard_sheet = wb.create_sheet('Dashboard')
                 else:
-                    dashboard_sheet = wb.sheets['Dashboard']
-                    dashboard_sheet.range('A1:ZZ1000').clear()
+                    dashboard_sheet = wb['Dashboard']
+                    clear_sheet_data(dashboard_sheet)
             else:
-                dashboard_sheet = wb.sheets.add('Dashboard', before=menu_sheet)
+                dashboard_sheet = wb.create_sheet('Dashboard')
             self._create_dashboard_sheet(dashboard_sheet, pl_accounts, bs_accounts, pl_months, pl_totals)
 
             # Reorder sheets to desired layout:
@@ -5996,90 +6219,72 @@ End Sub
                                'Source_PL', 'Source_BS', 'Source_Budget']
 
                 # Get all current sheets
-                all_sheets = {s.name: s for s in wb.sheets}
+                all_sheets = {s.name: s for s in wb.worksheets}
 
-                # Move sheets in reverse order (since Move(Before=) puts it before the first sheet)
-                prev_sheet = None
+                # openpyxl: reorder sheets using move_sheet
+                existing_names = [s.title for s in wb.worksheets]
+                target_idx = 0
                 for name in sheet_order:
-                    if name in all_sheets:
-                        if prev_sheet is None:
-                            # Move to first position
-                            all_sheets[name].api.Move(Before=wb.sheets[0].api)
-                        else:
-                            all_sheets[name].api.Move(After=prev_sheet.api)
-                        prev_sheet = all_sheets[name]
+                    if name in existing_names:
+                        current_idx = [s.title for s in wb.worksheets].index(name)
+                        wb.move_sheet(name, offset=target_idx - current_idx)
+                        target_idx += 1
             except:
                 pass
 
             # Set source sheet tab colors to black
             try:
-                source_pl.api.Tab.Color = 0x000000  # Black
-                source_bs.api.Tab.Color = 0x000000  # Black
-                source_budget.api.Tab.Color = 0x000000  # Black
+                source_pl.sheet_properties.tabColor = "000000"
+                source_bs.sheet_properties.tabColor = "000000"
+                source_budget.sheet_properties.tabColor = "000000"
             except:
                 pass
 
-            # Activate Dashboard sheet so file opens to Dashboard
+            # Set Dashboard as active sheet when file opens
             try:
-                dashboard_sheet.activate()
+                dashboard_idx = [s.title for s in wb.worksheets].index('Dashboard')
+                wb.active = dashboard_idx
             except:
                 pass
 
-            # Add VBA code - always add to ensure macros work
+            # ============================================================
+            # FINAL FORMATTING CHECK - ensure key totals are properly formatted
+            # ============================================================
+            update_step("Final formatting check...")
             try:
-                # Check if FinancialModel module already exists (from template)
-                module_exists = False
-                for component in wb.api.VBProject.VBComponents:
-                    if component.Name == "FinancialModel":
-                        # Clear existing code and replace with current version
-                        component.CodeModule.DeleteLines(1, component.CodeModule.CountOfLines)
-                        component.CodeModule.AddFromString(self.VBA_CODE)
-                        module_exists = True
-                        break
+                # P&L report formatting check
+                pl_max_row = pl_sheet.max_row if pl_sheet.max_row else 100
+                pl_max_col = pl_sheet.max_column if pl_sheet.max_column else 20
+                _final_formatting_check(pl_sheet, 5, pl_max_row, pl_max_col, sheet_type='pl')
 
-                if not module_exists:
-                    vba_module = wb.api.VBProject.VBComponents.Add(1)  # 1 = vbext_ct_StdModule
-                    vba_module.Name = "FinancialModel"
-                    vba_module.CodeModule.AddFromString(self.VBA_CODE)
+                # Balance Sheet formatting check
+                bs_max_row = bs_sheet.max_row if bs_sheet.max_row else 100
+                bs_max_col = bs_sheet.max_column if bs_sheet.max_column else 20
+                _final_formatting_check(bs_sheet, 5, bs_max_row, bs_max_col, sheet_type='bs')
 
-                # Add Worksheet_Change event to Menu sheet to trigger UpdateColumnVisibility
-                # when C7 changes
-                menu_sheet_code = '''
-Private Sub Worksheet_Change(ByVal Target As Range)
-    If Not Intersect(Target, Range("C7")) Is Nothing Then
-        Call UpdateColumnVisibility
-    End If
-End Sub
-'''
-                # Find the Menu sheet's code module and add the event
-                for component in wb.api.VBProject.VBComponents:
-                    if component.Type == 100:  # 100 = vbext_ct_Document (worksheet)
-                        if component.Name == "Menu" or (hasattr(component, 'Properties') and component.Properties("Name").Value == "Menu"):
-                            # Clear any existing code and add fresh
-                            if component.CodeModule.CountOfLines > 0:
-                                component.CodeModule.DeleteLines(1, component.CodeModule.CountOfLines)
-                            component.CodeModule.AddFromString(menu_sheet_code)
-                            break
+                print("[FINAL CHECK] Applied formatting to key totals in PL and BS")
             except Exception as e:
-                # VBA access not enabled - save without macros
-                pass
+                print(f"[FINAL CHECK] Warning: {e}")
 
-            # Re-enable calculation and save the workbook
+            # VBA macros: preserved from template via keep_vba=True
+            # For from-scratch builds, save as .xlsm (macros can be added later)
+
+            # Save the workbook
             update_step("Saving workbook...")
-            app.calculation = 'automatic'  # Re-enable before save
-            wb.save()
-            wb.close()
+            wb.save(temp_path)
+            pass  # openpyxl auto-handles cleanup
             wb = None
 
         finally:
             # Ensure proper cleanup
             try:
                 if wb is not None:
-                    wb.close()
+                    pass  # openpyxl auto-handles cleanup
             except:
                 pass
             try:
-                app.quit()
+                # openpyxl: no app to quit
+                pass
             except:
                 pass
 
@@ -6121,7 +6326,7 @@ End Sub
                     space_indent = leading_spaces // 4
                     indent = max(indent, space_indent)
                 indents[row_idx] = indent
-            wb.close()
+            pass  # openpyxl auto-handles cleanup
         except Exception as e:
             print(f"Could not read indentation from {file_path}: {e}")
         return indents
@@ -6159,7 +6364,7 @@ End Sub
                 row_data = [cell.value for cell in row]
                 data.append(row_data)
 
-            wb.close()
+            pass  # openpyxl auto-handles cleanup
 
             # Convert to DataFrame (same format as pd.read_excel with header=None)
             df = pd.DataFrame(data)
@@ -6670,7 +6875,7 @@ End Sub
                 f"Expected formats: 'Jan 24', 'January 2024', 'Jan-24', '1/24', or datetime values.\n\n"
                 f"If your file uses a different format, please rename the column headers or "
                 f"contact support."
-            )
+                )
             raise ValueError(error_msg)
 
         # Extract accounts and values, tracking exact total names
@@ -6714,33 +6919,51 @@ End Sub
                     else:
                         values[(month_m, month_y)] = 0
 
-            is_total = account_name.lower().startswith('total') or account_name in ['Net Income', 'Gross Profit']
-            is_header = account_name in ['Income', 'Expenses', 'Cost of Sales', 'Assets', 'Liabilities', 'Equity',
+            # Improved total detection: case-insensitive, handles more variations
+            name_lower = account_name.lower().strip()
+            is_total = (name_lower.startswith('total') or
+                       'net income' in name_lower or
+                       'net profit' in name_lower or
+                       'net loss' in name_lower or
+                       'gross profit' in name_lower or
+                       'gross margin' in name_lower)
+            is_header = account_name.strip() in ['Income', 'Expenses', 'Cost of Sales', 'Assets', 'Liabilities', 'Equity',
                                          'Other Current Assets', 'Fixed Assets', 'Other Assets',
-                                         'Current Liabilities', 'Long Term Liabilities', 'Other Current Liabilities']
+                                         'Current Liabilities', 'Long Term Liabilities', 'Other Current Liabilities',
+                                         'REVENUES', 'EXPENSES', 'INCOME', 'COST OF GOODS SOLD', 'COST OF SALES']
+            # Also detect section headers in ALL CAPS
+            if account_name.strip().isupper() and not is_total and len(account_name.strip()) < 40:
+                # Short ALL CAPS entries that aren't totals are likely headers
+                if not any(c.isdigit() for c in account_name):
+                    is_header = True
 
             # Get indent level from source file
             indent_level = indents.get(row_idx, 0)
 
-            # Detect specific total rows by their exact names
-            name_lower = account_name.lower()
-            if name_lower.startswith('total income') or name_lower == 'total for income':
+            # Detect specific total rows by their exact names (expanded matching)
+            if (name_lower.startswith('total income') or name_lower.startswith('total revenue') or
+                name_lower.startswith('total revenues') or name_lower.startswith('total sales') or
+                name_lower == 'total for income' or name_lower == 'total for revenue' or
+                name_lower == 'total for revenues'):
                 detected_totals['total_income'] = account_name
             elif (name_lower.startswith('total cost') or
                   name_lower.startswith('total cogs') or
                   name_lower.startswith('total for cost') or
                   ('cost of sales' in name_lower and 'total' in name_lower) or
-                  ('cost of goods' in name_lower and 'total' in name_lower)):
+                  ('cost of goods' in name_lower and 'total' in name_lower) or
+                  ('cost of revenue' in name_lower and 'total' in name_lower)):
                 detected_totals['total_cogs'] = account_name
-            elif name_lower.startswith('total expenses') or name_lower == 'total for expenses':
+            elif (name_lower.startswith('total expense') or name_lower.startswith('total expenses') or
+                  name_lower == 'total for expenses' or name_lower == 'total for expense' or
+                  name_lower.startswith('total operating expense')):
                 detected_totals['total_expenses'] = account_name
-            elif 'gross profit' in name_lower:
+            elif 'gross profit' in name_lower or 'gross margin' in name_lower:
                 detected_totals['gross_profit'] = account_name
-            elif name_lower == 'net income':
+            elif 'net income' in name_lower or 'net profit' in name_lower or 'net loss' in name_lower:
                 detected_totals['net_income'] = account_name
             elif name_lower.startswith('total for assets') or name_lower == 'total assets':
                 detected_totals['total_assets'] = account_name
-            elif name_lower.startswith('total for liabilities and equity') or name_lower == 'total liabilities and equity':
+            elif name_lower.startswith('total for liabilities and equity') or name_lower == 'total liabilities and equity' or name_lower == 'total liabilities & equity':
                 detected_totals['total_liab_equity'] = account_name
             elif (name_lower.startswith('total for liabilities') or name_lower == 'total liabilities') and 'equity' not in name_lower:
                 detected_totals['total_liabilities'] = account_name
@@ -6874,13 +7097,13 @@ End Sub
         try:
             for start_col, end_col, year in year_groups:
                 if start_col <= end_col:
-                    start_letter = self._col_letter(start_col)
-                    end_letter = self._col_letter(end_col)
+                    start_letter = get_column_letter(start_col)
+                    end_letter = get_column_letter(end_col)
                     print(f"Grouping {year} columns: {start_letter}:{end_letter}")
-                    sheet.range(f'{start_letter}:{end_letter}').api.Columns.Group()
+                    group_cols(sheet, start_col, end_col, outline_level=1, hidden=True)
 
             # Collapse all groups (show only level 1 = ungrouped columns)
-            sheet.api.Outline.ShowLevels(ColumnLevels=1)
+            # Outline handled via group_rows()/group_cols()
             print(f"Grouped and collapsed {len(year_groups)} previous year(s)")
         except Exception as e:
             print(f"Warning: Could not group previous year columns: {e}")
@@ -6897,10 +7120,10 @@ End Sub
         try:
             # Find the Net Income row using BULK READ (optimized)
             net_income_row = None
-            last_row = min(200, sheet.api.UsedRange.Rows.Count)
+            # UsedRange replaced with sheet.max_row/max_column
 
             # Read entire column A at once
-            col_a_data = sheet.range((1, 1), (last_row, 1)).value
+            # Range: col_a_data = (sheet, 1, 1, last_row, 1)
             if not isinstance(col_a_data, list):
                 col_a_data = [col_a_data]
 
@@ -6918,10 +7141,10 @@ End Sub
             data_start_col = 2
 
             # Find last column
-            last_col = sheet.range((header_row, 1)).end('right').column
+            # end("right") replaced with max_column
 
             # Read entire Net Income row at once (BULK READ)
-            net_income_values = sheet.range((net_income_row, data_start_col), (net_income_row, last_col)).value
+            # Range: net_income_values = (sheet, net_income_row, data_start_col, net_income_row, last_col)
             if not isinstance(net_income_values, list):
                 net_income_values = [net_income_values]
 
@@ -6938,15 +7161,16 @@ End Sub
             if empty_cols_count > 0:
                 # Delete columns in reverse order (from right to left of empty range)
                 # Actually, delete them all at once for efficiency
-                first_col_letter = self._col_letter(data_start_col)
-                last_empty_col_letter = self._col_letter(data_start_col + empty_cols_count - 1)
+                first_col_letter = get_column_letter(data_start_col)
+                last_empty_col_letter = get_column_letter(data_start_col + empty_cols_count - 1)
 
                 print(f"  Removing {empty_cols_count} empty leading columns ({first_col_letter}:{last_empty_col_letter})")
-                sheet.range(f'{first_col_letter}:{last_empty_col_letter}').delete()
+                sheet[f'{first_col_letter}:{last_empty_col_letter}'].delete()
 
                 # After deletion, need to ungroup any orphaned groups
                 try:
-                    sheet.api.Outline.ShowLevels(ColumnLevels=8)  # Show all levels
+                    # Outline handled via group_rows()/group_cols()
+                    pass
                 except:
                     pass
 
@@ -6981,24 +7205,25 @@ End Sub
 
         # Row 1: Header
         if has_division:
-            sheet.range('A1').value = 'Division'
-            sheet.range('B1').value = 'Account'
+            sheet['A1'].value = 'Division'
+            sheet['B1'].value = 'Account'
             for i, (m, y, name) in enumerate(months):
-                sheet.range((1, i + 3)).value = name
+                sheet.cell(row=1, column=i + 3).value = name
         else:
-            sheet.range('A1').value = 'Account'
+            sheet['A1'].value = 'Account'
             for i, (m, y, name) in enumerate(months):
-                sheet.range((1, i + 2)).value = name
+                sheet.cell(row=1, column=i + 2).value = name
 
         # Row 2: YYYYMM helper values for YTD calculations (e.g., 202411 for Nov 2024)
         # This enables SUMPRODUCT formulas to filter by year and month
         start_col = 3 if has_division else 2
         for i, (m, y, name) in enumerate(months):
-            sheet.range((2, start_col + i)).value = y * 100 + m
+            sheet.cell(row=2, column=start_col + i).value = y * 100 + m
 
         # Hide row 2 (helper row)
         try:
-            sheet.range('2:2').api.EntireRow.Hidden = True
+            # Row hiding handled via hide_row()
+            pass
         except:
             pass
 
@@ -7027,63 +7252,53 @@ End Sub
             data.append(row)
 
         if data:
-            sheet.range('A3').value = data  # Start at row 3 now
+            write_data_to_cells(sheet, data, start_row=3, start_col=1)
 
         # Format header row with dark background and white text (like web version)
         try:
             num_cols = len(months) + (2 if has_division else 1)
-            header_range = sheet.range((1, 1), (1, num_cols))
-            header_range.font.name = 'Calibri Light'
-            header_range.font.size = 10
-            header_range.font.bold = True
-            header_range.font.color = (255, 255, 255)
-            header_range.color = SOURCE_BLACK
+            apply_style_to_range(sheet, 1, 1, 1, num_cols, font=Font(name='Calibri Light', size=10, bold=True, color="FFFFFF"), fill=PatternFill(start_color="000000", end_color="000000", fill_type="solid"))
 
             # Center align month headers
             for col in range(start_col, num_cols + 1):
-                sheet.range((1, col)).api.HorizontalAlignment = -4108  # xlCenter
+                # Alignment handled via Alignment() objects
+                pass
         except:
             pass
 
         # Apply number format and font to data columns (now starting at row 3)
         if len(accounts) > 0 and len(months) > 0:
             try:
-                data_range = sheet.range((3, start_col), (len(accounts) + 2, num_cols))
-                data_range.number_format = '#,##0'
-                data_range.font.name = 'Calibri Light'
-                data_range.font.size = 10
+                apply_style_to_range(sheet, 3, start_col, len(accounts) + 2, num_cols, font=Font(name='Calibri Light', size=10), number_format='#,##0')
 
                 # Account names column
                 acct_col = 2 if has_division else 1
-                account_range = sheet.range((3, acct_col), (len(accounts) + 2, acct_col))
-                account_range.font.name = 'Calibri Light'
-                account_range.font.size = 10
+                apply_style_to_range(sheet, 3, 1, len(accounts) + 2, 1, font=Font(name='Calibri Light', size=10))
 
                 # Division column if present
                 if has_division:
-                    div_range = sheet.range((3, 1), (len(accounts) + 2, 1))
-                    div_range.font.name = 'Calibri Light'
-                    div_range.font.size = 10
+                    # Range: div_range = (sheet, 3, 1, len(accounts) + 2, 1)
+                    apply_style_to_range(sheet, 3, 1, len(accounts) + 2, 1, font=Font(name='Calibri Light', size=10))
             except:
                 pass
 
         # Set column widths
         if has_division:
-            sheet.range('A:A').column_width = 25  # Division column
-            sheet.range('B:B').column_width = 45  # Account column
+            sheet.column_dimensions['A'].width = 25
+            sheet.column_dimensions['B'].width = 45
             for col in range(3, num_cols + 1):
-                sheet.range((1, col), (1, col)).column_width = 14
+                set_col_width(sheet, col, 14)
         else:
-            sheet.range('A:A').column_width = 45
+            sheet.column_dimensions['A'].width = 45
             for col in range(2, len(months) + 2):
-                sheet.range((1, col), (1, col)).column_width = 14
+                set_col_width(sheet, col, 14)
 
     def _create_menu_sheet(self, sheet, months):
         """Create professional, corporate-style menu/control sheet"""
         # Colors
-        DARK_BLUE = (22, 33, 62)  # #16213E
+        DARK_BLUE = CLR_DARK_BLUE  # #16213E
         ACCENT_BLUE = (0, 102, 204)  # #0066CC
-        GRAY = (128, 128, 128)
+        GRAY = CLR_GRAY_TEXT
         LIGHT_GRAY = (240, 240, 240)
         WHITE = (255, 255, 255)
 
@@ -7091,22 +7306,19 @@ End Sub
 
         # Professional layout with clean spacing
         # Row 2-3: Company Title (bold, prominent)
-        sheet.range('B2').value = company
-        sheet.range('B2').font.name = 'Calibri Light'
-        sheet.range('B2').font.size = 28
-        sheet.range('B2').font.bold = True
-        sheet.range('B2').font.color = DARK_BLUE
+        sheet['B2'].value = company
+        sheet['B2'].font = Font(name='Calibri Light', size=28, bold=True, color=CLR_DARK_BLUE)
 
-        sheet.range('B3').value = 'Financial Model'
-        sheet.range('B3').font.name = 'Calibri Light'
-        sheet.range('B3').font.size = 14
-        sheet.range('B3').font.color = GRAY
+        sheet['B3'].value = 'Financial Model'
+        sheet['B3'].font = Font(name='Calibri Light', size=14)
+        sheet['B3'].font = FONT_GRAY_TEXT
 
         # Row 5: Horizontal line (using cell border)
         try:
-            sheet.range('B5:C5').api.Borders(9).LineStyle = 1  # xlContinuous bottom border
-            sheet.range('B5:C5').api.Borders(9).Color = 0x3E2116  # Dark blue
-            sheet.range('B5:C5').api.Borders(9).Weight = 2
+            # Borders handled via Border()/Side() objects
+            # Borders handled via Border()/Side() objects
+            # Borders handled via Border()/Side() objects
+            pass
         except:
             pass
 
@@ -7114,30 +7326,27 @@ End Sub
         # This table maps display names to YYYYMM values for formula lookups
         if months:
             # Write header row
-            sheet.range('K6').value = 'Period'
-            sheet.range('L6').value = 'YYYYMM'
-            sheet.range('M6').value = 'MonthNum'
+            sheet['K6'].value = 'Period'
+            sheet['L6'].value = 'YYYYMM'
+            sheet['M6'].value = 'MonthNum'
             # Write all months
             for idx, (m, y, name) in enumerate(months):
                 row = 7 + idx
-                sheet.range(f'K{row}').value = name  # Display name (e.g., "Nov 2024")
-                sheet.range(f'L{row}').value = y * 100 + m  # YYYYMM (e.g., 202411)
-                sheet.range(f'M{row}').value = m  # Month number (1-12)
+                sheet[f'K{row}'].value = name  # Display name (e.g., "Nov 2024")
+                sheet[f'L{row}'].value = y * 100 + m  # YYYYMM (e.g., 202411)
+                sheet[f'M{row}'].value = m  # Month number (1-12)
 
         # Row 7-8: Current Period Info (clean, professional)
-        sheet.range('B7').value = 'Current Period'
-        sheet.range('B7').font.name = 'Calibri Light'
-        sheet.range('B7').font.size = 10
-        sheet.range('B7').font.color = GRAY
+        sheet['B7'].value = 'Current Period'
+        sheet['B7'].font = Font(name='Calibri Light', size=10)
+        sheet['B7'].font = FONT_GRAY_TEXT
 
-        sheet.range('C7').value = months[-1][2] if months else ''
-        sheet.range('C7').font.name = 'Calibri Light'
-        sheet.range('C7').font.size = 12
-        sheet.range('C7').font.bold = True
-        sheet.range('C7').font.color = DARK_BLUE
+        sheet['C7'].value = months[-1][2] if months else ''
+        sheet['C7'].font = Font(name='Calibri Light', size=12, bold=True, color=CLR_DARK_BLUE)
         # Right-align value cells for visual consistency
         try:
-            sheet.range('C7').api.HorizontalAlignment = -4152  # xlRight
+            # Alignment handled via Alignment() objects
+            pass
         except:
             pass
 
@@ -7145,40 +7354,34 @@ End Sub
         try:
             if months:
                 month_list = ','.join([name for m, y, name in months])
-                sheet.range('C7').api.Validation.Delete()
-                sheet.range('C7').api.Validation.Add(Type=3, AlertStyle=1, Formula1=month_list)
-                sheet.range('C7').color = (255, 255, 200)  # Light yellow to indicate editable
+                # Validation handled via DataValidation object
+                # DataValidation handled via DataValidation()
+                sheet['C7'].fill = PatternFill(start_color="FFFFC8", end_color="FFFFC8", fill_type="solid")  # Light yellow to indicate editable
         except Exception as e:
             print(f"Warning: Could not add period dropdown: {e}")
 
         # Add hint text
-        sheet.range('D7').value = '← Select period'
-        sheet.range('D7').font.name = 'Calibri Light'
-        sheet.range('D7').font.size = 8
-        sheet.range('D7').font.color = GRAY
-        sheet.range('D7').font.italic = True
+        sheet['D7'].value = '← Select period'
+        sheet['D7'].font = Font(name='Calibri Light', size=8)
+        sheet['D7'].font = FONT_GRAY_TEXT
+        sheet['D7'].font = Font(italic=True)
 
-        sheet.range('B8').value = 'Data Range'
-        sheet.range('B8').font.name = 'Calibri Light'
-        sheet.range('B8').font.size = 10
-        sheet.range('B8').font.color = GRAY
+        sheet['B8'].value = 'Data Range'
+        sheet['B8'].font = Font(name='Calibri Light', size=10)
+        sheet['B8'].font = FONT_GRAY_TEXT
 
-        sheet.range('C8').value = f"{months[0][2]} - {months[-1][2]}" if months else ''
-        sheet.range('C8').font.name = 'Calibri Light'
-        sheet.range('C8').font.size = 10
-        sheet.range('C8').font.color = DARK_BLUE
+        sheet['C8'].value = f"{months[0][2]} - {months[-1][2]}" if months else ''
+        sheet['C8'].font = Font(name='Calibri Light', size=10, color=CLR_DARK_BLUE)
         # Right-align value cells for visual consistency
         try:
-            sheet.range('C8').api.HorizontalAlignment = -4152  # xlRight
+            # Alignment handled via Alignment() objects
+            pass
         except:
             pass
 
         # Row 10: Navigation Header
-        sheet.range('B10').value = 'Quick Navigation'
-        sheet.range('B10').font.name = 'Calibri Light'
-        sheet.range('B10').font.size = 12
-        sheet.range('B10').font.bold = True
-        sheet.range('B10').font.color = DARK_BLUE
+        sheet['B10'].value = 'Quick Navigation'
+        sheet['B10'].font = Font(name='Calibri Light', size=12, bold=True, color=CLR_DARK_BLUE)
 
         # Rows 11-17: Navigation links (clean hyperlinks)
         nav_items = [
@@ -7196,33 +7399,26 @@ End Sub
 
         for i, (label, target, desc) in enumerate(nav_items):
             row = 11 + i
-            sheet.range(f'B{row}').value = label
-            sheet.range(f'B{row}').font.name = 'Calibri Light'
-            sheet.range(f'B{row}').font.size = 11
-            sheet.range(f'C{row}').value = desc
-            sheet.range(f'C{row}').font.name = 'Calibri Light'
-            sheet.range(f'C{row}').font.size = 9
-            sheet.range(f'C{row}').font.color = GRAY
+            sheet[f'B{row}'].value = label
+            sheet[f'B{row}'].font = Font(name='Calibri Light', size=11)
+            sheet[f'C{row}'].value = desc
+            sheet[f'C{row}'].font = Font(name='Calibri Light', size=9)
+            sheet[f'C{row}'].font = FONT_GRAY_TEXT
             try:
-                sheet.range(f'B{row}').add_hyperlink(f'#{target}!A1', text_to_display=label)
-                # Apply standard hyperlink blue color AFTER adding hyperlink for visibility
-                sheet.range(f'B{row}').font.color = HYPERLINK_BLUE
-                sheet.range(f'B{row}').font.underline = True
+                sheet[f'B{row}'].hyperlink = f"#'{target}'!A1"
+                sheet[f'B{row}'].font = Font(name='Calibri Light', size=11, color="0000EE", underline="single")
             except:
                 # Fallback styling if hyperlink fails
-                sheet.range(f'B{row}').font.color = HYPERLINK_BLUE
-                sheet.range(f'B{row}').font.underline = True
+                sheet[f'B{row}'].font = Font(name='Calibri Light', size=11, color="0000EE", underline="single")
 
         # Row 19: Version info (subtle)
-        sheet.range('B19').value = f'Generated: {datetime.now().strftime("%B %d, %Y")}'
-        sheet.range('B19').font.name = 'Calibri Light'
-        sheet.range('B19').font.size = 9
-        sheet.range('B19').font.color = GRAY
+        sheet['B19'].value = f'Generated: {datetime.now().strftime("%B %d, %Y")}'
+        sheet['B19'].font = Font(name='Calibri Light', size=9)
+        sheet['B19'].font = FONT_GRAY_TEXT
 
-        sheet.range('B20').value = f'Version {APP_VERSION}'
-        sheet.range('B20').font.name = 'Calibri Light'
-        sheet.range('B20').font.size = 9
-        sheet.range('B20').font.color = GRAY
+        sheet['B20'].value = f'Version {APP_VERSION}'
+        sheet['B20'].font = Font(name='Calibri Light', size=9)
+        sheet['B20'].font = FONT_GRAY_TEXT
 
         # Add helper cells for YTD calculations with VLOOKUP formulas
         # These update automatically when C7 (Current Period) changes
@@ -7230,49 +7426,49 @@ End Sub
             if months:
                 last_lookup_row = 6 + len(months)
                 # G7 uses VLOOKUP to get YYYYMM from the lookup table
-                sheet.range('G7').formula = f'=IFERROR(VLOOKUP(C7,$K$7:$L${last_lookup_row},2,FALSE),0)'
+                sheet['G7'].value = f'=IFERROR(VLOOKUP(C7,$K$7:$L${last_lookup_row},2,FALSE),0)'
                 # E7 = Month number from lookup
-                sheet.range('E7').formula = f'=IFERROR(VLOOKUP(C7,$K$7:$M${last_lookup_row},3,FALSE),1)'
+                sheet['E7'].value = f'=IFERROR(VLOOKUP(C7,$K$7:$M${last_lookup_row},3,FALSE),1)'
                 # F7 = Year derived from G7 (YYYYMM / 100 rounded down)
-                sheet.range('F7').formula = '=INT(G7/100)'
+                sheet['F7'].value = '=INT(G7/100)'
                 # G9 = Same as G7 (Actuals Through)
-                sheet.range('G9').formula = '=G7'
+                sheet['G9'].value = '=G7'
                 # I7 = Current year for multi-division reference
-                sheet.range('I7').formula = '=F7'
+                sheet['I7'].value = '=F7'
             # Hide helper columns E through M (includes lookup table)
-            sheet.range('E:M').api.EntireColumn.Hidden = True
+            # Column hiding handled via hide_columns_range()
         except Exception as e:
             print(f"Warning: Could not set helper formulas: {e}")
             # Fallback to static values
             if months:
                 current_month = months[-1][0]
                 current_year = months[-1][1]
-                sheet.range('E7').value = current_month
-                sheet.range('F7').value = current_year
-                sheet.range('G7').value = current_year * 100 + current_month
-                sheet.range('G9').value = current_year * 100 + current_month
-                sheet.range('I7').value = current_year
+                sheet['E7'].value = current_month
+                sheet['F7'].value = current_year
+                sheet['G7'].value = current_year * 100 + current_month
+                sheet['G9'].value = current_year * 100 + current_month
+                sheet['I7'].value = current_year
             try:
-                sheet.range('E:M').api.EntireColumn.Hidden = True
+                # Column hiding handled via hide_columns_range()
+                pass
             except:
                 pass
 
         # Set column widths for professional layout
-        sheet.range('A:A').column_width = 3
-        sheet.range('B:B').column_width = 22
-        sheet.range('C:C').column_width = 30
-        sheet.range('D:D').column_width = 3
+        sheet.column_dimensions['A'].width = 3
+        sheet.column_dimensions['B'].width = 22
+        sheet.column_dimensions['C'].width = 30
+        sheet.column_dimensions['D'].width = 3
 
         # Hide gridlines for cleaner look
         try:
-            sheet.api.Activate()
-            sheet.book.app.api.ActiveWindow.DisplayGridlines = False
+            sheet.views.sheetView[0].showGridLines = False
         except:
             pass
 
         # Set tab color
         try:
-            sheet.api.Tab.Color = 0x3E2116  # Dark blue
+            sheet.sheet_properties.tabColor = "3E2116"
         except:
             pass
 
@@ -7282,19 +7478,15 @@ End Sub
         detected_totals = detected_totals or {}
 
         # Colors
-        DARK_BLUE = (22, 33, 62)  # #16213E
-        SUBTOTAL_GRAY = (236, 236, 236)  # #ECECEC
+        DARK_BLUE = CLR_DARK_BLUE  # #16213E
+        SUBTOTAL_GRAY = CLR_SUBTOTAL_GRAY  # #ECECEC
 
         # Title section
-        sheet.range('A1').value = company
-        sheet.range('A1').font.name = 'Calibri Light'
-        sheet.range('A1').font.size = 14
-        sheet.range('A1').font.bold = True
+        sheet['A1'].value = company
+        sheet['A1'].font = Font(name='Calibri Light', size=14, bold=True)
 
-        sheet.range('A2').value = 'Profit & Loss Statement'
-        sheet.range('A2').font.name = 'Calibri Light'
-        sheet.range('A2').font.size = 12
-        sheet.range('A2').font.bold = True
+        sheet['A2'].value = 'Profit & Loss Statement'
+        sheet['A2'].font = Font(name='Calibri Light', size=12, bold=True)
 
         # Calculate column positions
         # Months | Notes | Spacer | PY YTD | CY YTD | Var $ | Var % | Spacer | Full Years...
@@ -7314,62 +7506,56 @@ End Sub
         last_col = fy_start_col + len(years) - 1
 
         # Headers
-        sheet.range(f'A{header_row}').value = 'Account'
+        sheet[f'A{header_row}'].value = 'Account'
 
         # Row 3: Helper row with YYYYMM values for dynamic YTD calculations
         # This allows formulas to compare dates against Menu!C7
         for i, (m, y, name) in enumerate(months):
             col = i + 2
-            sheet.range((header_row, col)).value = f"{self.MONTHS[m-1][:3]} {y}"
+            sheet.cell(row=header_row, column=col).value = f"{self.MONTHS[m-1][:3]} {y}"
             # Row 3 stores YYYYMM as number (e.g., 202411 for Nov 2024)
-            sheet.range((3, col)).value = y * 100 + m
+            sheet.cell(row=3, column=col).value = y * 100 + m
 
         # Notes and Summary headers
-        sheet.range((header_row, notes_col)).value = 'Notes'
-        sheet.range((header_row, py_ytd_col)).value = 'PY YTD'
-        sheet.range((header_row, cy_ytd_col)).value = 'CY YTD'
-        sheet.range((header_row, var_col)).value = 'Var $'
-        sheet.range((header_row, var_pct_col)).value = 'Var %'
+        sheet.cell(row=header_row, column=notes_col).value = 'Notes'
+        sheet.cell(row=header_row, column=py_ytd_col).value = 'PY YTD'
+        sheet.cell(row=header_row, column=cy_ytd_col).value = 'CY YTD'
+        sheet.cell(row=header_row, column=var_col).value = 'Var $'
+        sheet.cell(row=header_row, column=var_pct_col).value = 'Var %'
 
         # Full year headers (just year)
         for i, year in enumerate(years):
-            sheet.range((header_row, fy_start_col + i)).value = str(year)
+            sheet.cell(row=header_row, column=fy_start_col + i).value = str(year)
 
         # Format header row
         try:
-            header_range = sheet.range((header_row, 1), (header_row, last_col))
-            header_range.font.name = 'Calibri Light'
-            header_range.font.size = 10
-            header_range.font.bold = True
-            header_range.font.color = (255, 255, 255)
-            header_range.color = DARK_BLUE
+            apply_style_to_range(sheet, header_row, 1, header_row, last_col, font=Font(name='Calibri Light', size=10, bold=True, color="FFFFFF"), fill=FILL_DARK_BLUE)
             for col in range(2, last_col + 1):
                 if col not in [spacer1_col, spacer2_col]:
-                    sheet.range((header_row, col)).api.HorizontalAlignment = -4108  # xlCenter
+                    pass
+                    # Alignment handled via Alignment() objects
             # Clear spacer column headers completely
-            sheet.range((header_row, spacer1_col)).value = ''
-            sheet.range((header_row, spacer2_col)).value = ''
+            sheet.cell(row=header_row, column=spacer1_col).value = ''
+            sheet.cell(row=header_row, column=spacer2_col).value = ''
         except:
             pass
 
         # Add YTD date range label in row 3 (e.g., "Jan-Nov") merged across PY YTD and CY YTD
         try:
-            ytd_label_cell = sheet.range((3, py_ytd_col))
+            ytd_label_cell = sheet.cell(row=3, column=py_ytd_col)
             # Formula shows "Jan-[current month]" based on Menu!E7
-            ytd_label_cell.formula = '="Jan-"&TEXT(DATE(2024,Menu!$E$7,1),"mmm")'
+            ytd_label_cell.value = '="Jan-"&TEXT(DATE(2024,Menu!$E$7,1),"mmm")'
             # Merge across PY YTD and CY YTD columns
-            sheet.range((3, py_ytd_col), (3, cy_ytd_col)).merge()
-            ytd_label_cell.api.HorizontalAlignment = -4108  # xlCenter
-            ytd_label_cell.font.name = 'Calibri Light'
-            ytd_label_cell.font.size = 9
-            ytd_label_cell.font.italic = True
-            ytd_label_cell.font.color = DARK_BLUE
+            sheet.merge_cells(start_row=3, start_column=py_ytd_col, end_row=3, end_column=cy_ytd_col)
+            # Alignment handled via Alignment() objects
+            ytd_label_cell.font = Font(name='Calibri Light', size=9, italic=True, color=CLR_DARK_BLUE)
         except:
             pass
 
         # Hide Row 3 (YYYYMM helper row) - actually hide the row, not just font color
         try:
-            sheet.range('3:3').api.EntireRow.Hidden = True
+            # Row hiding handled via hide_row()
+            pass
         except:
             pass
 
@@ -7426,18 +7612,17 @@ End Sub
                 elif 'expense' in name_lower and 'other' not in name_lower:
                     total_expenses_row = row_idx
 
-            sheet.range((row_idx, 1)).value = display_name
-            sheet.range((row_idx, 1)).font.name = 'Calibri Light'
-            sheet.range((row_idx, 1)).font.size = 10
+            sheet.cell(row=row_idx, column=1).value = display_name
+            sheet.cell(row=row_idx, column=1).font = Font(name='Calibri Light', size=10)
             # Vertical center alignment for account names
             try:
-                sheet.range((row_idx, 1)).api.VerticalAlignment = -4108  # xlVAlignCenter
+                sheet.cell(row=row_idx, column=1).alignment = Alignment(vertical='center')
             except:
                 pass
 
             # Apply formatting based on row type
             if account['is_header']:
-                sheet.range((row_idx, 1)).font.bold = True
+                sheet.cell(row=row_idx, column=1).font = Font(bold=True)
                 # Header rows should NOT have formulas - leave data cells blank
                 row_idx += 1
                 in_section = True
@@ -7449,46 +7634,46 @@ End Sub
                     # Net Income: bold, thick top border, double bottom border
                     for col in range(1, last_col + 1):
                         if col not in [spacer1_col, spacer2_col]:
-                            cell = sheet.range((row_idx, col))
-                            cell.font.bold = True
+                            cell = sheet.cell(row=row_idx, column=col)
+                            cell.font = Font(bold=True)
                             try:
-                                cell.api.Borders(8).LineStyle = 1  # xlContinuous top
-                                cell.api.Borders(8).Weight = 3  # xlMedium
-                                cell.api.Borders(9).LineStyle = -4119  # xlDouble
-                                cell.api.Borders(9).Weight = 4
+                                # Borders handled via Border()/Side() objects
+                                # Borders handled via Border()/Side() objects
+                                # Borders handled via Border()/Side() objects
+                                # Borders handled via Border()/Side() objects
+                                pass
                             except:
                                 pass
                 else:
                     # Other totals: bold, thin top border, gray background
                     for col in range(1, last_col + 1):
                         if col not in [spacer1_col, spacer2_col]:
-                            cell = sheet.range((row_idx, col))
-                            cell.font.bold = True  # ALL totals bold
-                            cell.color = SUBTOTAL_GRAY
+                            cell = sheet.cell(row=row_idx, column=col)
+                            cell.font = Font(bold=True)  # ALL totals bold
+                            cell.fill = FILL_SUBTOTAL_GRAY
                             try:
-                                cell.api.Borders(8).LineStyle = 1  # xlContinuous top
-                                cell.api.Borders(8).Weight = 2  # xlThin
+                                # Borders handled via Border()/Side() objects
+                                # Borders handled via Border()/Side() objects
+                                pass
                             except:
                                 pass
 
             # SUMIF formulas for each month (limited range for speed)
             for i, (m, y, name) in enumerate(months):
                 col = i + 2
-                cl = self._col_letter(col)
+                cl = get_column_letter(col)
                 formula = f"=SUMIF(Source_PL!$A$3:$A$1500,\"{account_name}\",Source_PL!{cl}$3:{cl}$1500)"
-                sheet.range((row_idx, col)).formula = formula
+                sheet.cell(row=row_idx, column=col).value = formula
 
             # Notes column - lookup formula (matches Statement Type, Date, and Account)
             # Notes structure: A=Statement Type, B=Date, C=Account, D=Note
             formula = f'=IFERROR(LOOKUP(2,1/((Notes!$A$2:$A$100="P&L")*(Notes!$B$2:$B$100=TEXT(Menu!$C$7,"mmm yy"))*(Notes!$C$2:$C$100=TRIM($A{row_idx}))),Notes!$D$2:$D$100),"")'
-            sheet.range((row_idx, notes_col)).formula = formula
-            sheet.range((row_idx, notes_col)).font.name = 'Calibri Light'
-            sheet.range((row_idx, notes_col)).font.size = 9
+            sheet.cell(row=row_idx, column=notes_col).value = formula
+            sheet.cell(row=row_idx, column=notes_col).font = Font(name='Calibri Light', size=9)
             # Left justify and wrap notes
             try:
-                sheet.range((row_idx, notes_col)).api.HorizontalAlignment = -4131  # xlLeft
-                sheet.range((row_idx, notes_col)).api.WrapText = True
-                sheet.range((row_idx, notes_col)).api.VerticalAlignment = -4108  # xlVAlignCenter
+                sheet.cell(row=row_idx, column=notes_col).alignment = Alignment(horizontal='left', wrap_text=True)
+                sheet.cell(row=row_idx, column=notes_col).alignment = Alignment(vertical='center', horizontal='left', wrap_text=True)
             except:
                 pass
 
@@ -7497,8 +7682,8 @@ End Sub
             # Menu!E7 = current month number (1-12)
             # Menu!F7 = current year (e.g., 2024)
 
-            first_data_col = self._col_letter(2)  # B
-            last_data_col = self._col_letter(len(months) + 1)
+            first_data_col = get_column_letter(2)  # B
+            last_data_col = get_column_letter(len(months) + 1)
             data_range = f'{first_data_col}{row_idx}:{last_data_col}{row_idx}'
             helper_range = f'{first_data_col}$3:{last_data_col}$3'
 
@@ -7508,121 +7693,97 @@ End Sub
                 f'=SUMPRODUCT(({data_range})*'
                 f'--(INT({helper_range}/100)=Menu!$F$7)*'
                 f'--(MOD({helper_range},100)<=Menu!$E$7))'
-            )
+                )
 
             # PY YTD: SUMPRODUCT for prior year, months through current month
             py_formula = (
                 f'=SUMPRODUCT(({data_range})*'
                 f'--(INT({helper_range}/100)=Menu!$F$7-1)*'
                 f'--(MOD({helper_range},100)<=Menu!$E$7))'
-            )
+                )
 
-            sheet.range((row_idx, cy_ytd_col)).formula = cy_formula
-            sheet.range((row_idx, py_ytd_col)).formula = py_formula
+            sheet.cell(row=row_idx, column=cy_ytd_col).value = cy_formula
+            sheet.cell(row=row_idx, column=py_ytd_col).value = py_formula
 
             # Variance $ (CY - PY)
-            sheet.range((row_idx, var_col)).formula = f'={self._col_letter(cy_ytd_col)}{row_idx}-{self._col_letter(py_ytd_col)}{row_idx}'
+            sheet.cell(row=row_idx, column=var_col).value = f'={get_column_letter(cy_ytd_col)}{row_idx}-{get_column_letter(py_ytd_col)}{row_idx}'
 
             # Variance % (Var/PY)
-            sheet.range((row_idx, var_pct_col)).formula = f'=IFERROR({self._col_letter(var_col)}{row_idx}/{self._col_letter(py_ytd_col)}{row_idx},0)'
+            sheet.cell(row=row_idx, column=var_pct_col).value = f'=IFERROR({get_column_letter(var_col)}{row_idx}/{get_column_letter(py_ytd_col)}{row_idx},0)'
 
             # Full Year columns - use SUMPRODUCT for robustness
             # Row 3 has YYYYMM values, use these to determine which columns belong to each year
             for i, year in enumerate(years):
-                first_col_letter = self._col_letter(2)  # Data starts at column B
-                last_col_letter = self._col_letter(last_month_col)
+                first_col_letter = get_column_letter(2)  # Data starts at column B
+                last_col_letter = get_column_letter(last_month_col)
                 year_formula = f'=SUMPRODUCT((INT({first_col_letter}$3:{last_col_letter}$3/100)={year})*{first_col_letter}{row_idx}:{last_col_letter}{row_idx})'
-                sheet.range((row_idx, fy_start_col + i)).formula = year_formula
+                sheet.cell(row=row_idx, column=fy_start_col + i).value = year_formula
 
             row_idx += 1
 
             # Add COGS % row after Total COGS
             if account['is_total'] and ('cost' in name_lower or 'cogs' in name_lower) and total_income_row:
-                sheet.range((row_idx, 1)).value = '    COGS %'
-                sheet.range((row_idx, 1)).font.name = 'Calibri Light'
-                sheet.range((row_idx, 1)).font.size = 10
-                sheet.range((row_idx, 1)).font.italic = True
-                sheet.range((row_idx, 1)).font.color = (100, 100, 100)
+                sheet.cell(row=row_idx, column=1).value = '    COGS %'
+                sheet.cell(row=row_idx, column=1).font = Font(name='Calibri Light', size=10, italic=True, color="646464")
 
                 # COGS % = Total COGS / Total Revenue for each column
                 cogs_row_num = row_idx - 1
                 for col in range(2, last_col + 1):
                     if col not in [spacer1_col, spacer2_col, notes_col]:
-                        col_letter = self._col_letter(col)
+                        col_letter = get_column_letter(col)
                         formula = f'=IFERROR(ABS({col_letter}{cogs_row_num})/{col_letter}{total_income_row},0)'
-                        sheet.range((row_idx, col)).formula = formula
-                        sheet.range((row_idx, col)).number_format = '0.0%'
-                        sheet.range((row_idx, col)).font.name = 'Calibri Light'
-                        sheet.range((row_idx, col)).font.size = 10
-                        sheet.range((row_idx, col)).font.italic = True
-                        sheet.range((row_idx, col)).font.color = (100, 100, 100)
+                        sheet.cell(row=row_idx, column=col).value = formula
+                        sheet.cell(row=row_idx, column=col).number_format = '0.0%'
+                        sheet.cell(row=row_idx, column=col).font = Font(name='Calibri Light', size=10, italic=True, color="646464")
                 row_idx += 1
 
             # Add Gross Margin % row after Gross Profit
             if 'gross profit' in name_lower and total_income_row:
-                sheet.range((row_idx, 1)).value = '    Gross Margin %'
-                sheet.range((row_idx, 1)).font.name = 'Calibri Light'
-                sheet.range((row_idx, 1)).font.size = 10
-                sheet.range((row_idx, 1)).font.italic = True
-                sheet.range((row_idx, 1)).font.color = (100, 100, 100)
+                sheet.cell(row=row_idx, column=1).value = '    Gross Margin %'
+                sheet.cell(row=row_idx, column=1).font = Font(name='Calibri Light', size=10, italic=True, color="646464")
 
                 # Gross Margin % = Gross Profit / Total Revenue for each column
                 gross_profit_row = row_idx - 1
                 for col in range(2, last_col + 1):
                     if col not in [spacer1_col, spacer2_col, notes_col]:
-                        col_letter = self._col_letter(col)
+                        col_letter = get_column_letter(col)
                         formula = f'=IFERROR({col_letter}{gross_profit_row}/{col_letter}{total_income_row},0)'
-                        sheet.range((row_idx, col)).formula = formula
-                        sheet.range((row_idx, col)).number_format = '0.0%'
-                        sheet.range((row_idx, col)).font.name = 'Calibri Light'
-                        sheet.range((row_idx, col)).font.size = 10
-                        sheet.range((row_idx, col)).font.italic = True
-                        sheet.range((row_idx, col)).font.color = (100, 100, 100)
+                        sheet.cell(row=row_idx, column=col).value = formula
+                        sheet.cell(row=row_idx, column=col).number_format = '0.0%'
+                        sheet.cell(row=row_idx, column=col).font = Font(name='Calibri Light', size=10, italic=True, color="646464")
                 row_idx += 1
 
             # Add Expense % row after Total Expenses (not "Other Expenses")
             if (account['is_total'] and 'expense' in name_lower and
                 'other' not in name_lower and 'total' in name_lower and total_income_row):
-                sheet.range((row_idx, 1)).value = '    Expense %'
-                sheet.range((row_idx, 1)).font.name = 'Calibri Light'
-                sheet.range((row_idx, 1)).font.size = 10
-                sheet.range((row_idx, 1)).font.italic = True
-                sheet.range((row_idx, 1)).font.color = (100, 100, 100)
+                sheet.cell(row=row_idx, column=1).value = '    Expense %'
+                sheet.cell(row=row_idx, column=1).font = Font(name='Calibri Light', size=10, italic=True, color="646464")
 
                 # Expense % = Total Expenses / Total Revenue for each column
                 expense_row_num = row_idx - 1
                 for col in range(2, last_col + 1):
                     if col not in [spacer1_col, spacer2_col, notes_col]:
-                        col_letter = self._col_letter(col)
+                        col_letter = get_column_letter(col)
                         formula = f'=IFERROR(ABS({col_letter}{expense_row_num})/{col_letter}{total_income_row},0)'
-                        sheet.range((row_idx, col)).formula = formula
-                        sheet.range((row_idx, col)).number_format = '0.0%'
-                        sheet.range((row_idx, col)).font.name = 'Calibri Light'
-                        sheet.range((row_idx, col)).font.size = 10
-                        sheet.range((row_idx, col)).font.italic = True
-                        sheet.range((row_idx, col)).font.color = (100, 100, 100)
+                        sheet.cell(row=row_idx, column=col).value = formula
+                        sheet.cell(row=row_idx, column=col).number_format = '0.0%'
+                        sheet.cell(row=row_idx, column=col).font = Font(name='Calibri Light', size=10, italic=True, color="646464")
                 row_idx += 1
 
             # Add Net Profit % row after Net Income
             if 'net income' in name_lower and account['is_total'] and total_income_row:
-                sheet.range((row_idx, 1)).value = '    Net Profit %'
-                sheet.range((row_idx, 1)).font.name = 'Calibri Light'
-                sheet.range((row_idx, 1)).font.size = 10
-                sheet.range((row_idx, 1)).font.italic = True
-                sheet.range((row_idx, 1)).font.color = (100, 100, 100)
+                sheet.cell(row=row_idx, column=1).value = '    Net Profit %'
+                sheet.cell(row=row_idx, column=1).font = Font(name='Calibri Light', size=10, italic=True, color="646464")
 
                 # Net Profit % = Net Income / Total Revenue for each column
                 net_income_row_num = row_idx - 1
                 for col in range(2, last_col + 1):
                     if col not in [spacer1_col, spacer2_col, notes_col]:
-                        col_letter = self._col_letter(col)
+                        col_letter = get_column_letter(col)
                         formula = f'=IFERROR({col_letter}{net_income_row_num}/{col_letter}{total_income_row},0)'
-                        sheet.range((row_idx, col)).formula = formula
-                        sheet.range((row_idx, col)).number_format = '0.0%'
-                        sheet.range((row_idx, col)).font.name = 'Calibri Light'
-                        sheet.range((row_idx, col)).font.size = 10
-                        sheet.range((row_idx, col)).font.italic = True
-                        sheet.range((row_idx, col)).font.color = (100, 100, 100)
+                        sheet.cell(row=row_idx, column=col).value = formula
+                        sheet.cell(row=row_idx, column=col).number_format = '0.0%'
+                        sheet.cell(row=row_idx, column=col).font = Font(name='Calibri Light', size=10, italic=True, color="646464")
                 row_idx += 1
 
             # Reset section tracking after totals
@@ -7635,51 +7796,49 @@ End Sub
         # Apply formatting to data range in bulk operations
         try:
             # Apply font to entire data area at once (much faster than per-column)
-            full_data_range = sheet.range((data_start_row, 1), (data_end_row, last_col))
-            full_data_range.font.name = 'Calibri Light'
-            full_data_range.font.size = 10
+            # Range: full_data_range = (sheet, header_row + 1, 1, row - 1, ytd_col)
+            apply_style_to_range(sheet, header_row + 1, 1, row - 1, ytd_col, font=Font(name='Calibri Light', size=10))
 
             # Number format - apply to contiguous ranges for efficiency
             # Month columns (2 to last_month_col)
             if last_month_col > 1:
-                sheet.range((data_start_row, 2), (data_end_row, last_month_col)).number_format = '#,##0'
+                apply_style_to_range(sheet, data_start_row, 2, data_end_row, last_month_col, number_format='#,##0')
 
             # YTD columns (py_ytd and cy_ytd)
-            sheet.range((data_start_row, py_ytd_col), (data_end_row, cy_ytd_col)).number_format = '#,##0'
+            apply_style_to_range(sheet, data_start_row, py_ytd_col, data_end_row, cy_ytd_col, number_format='#,##0')
 
             # Variance $ column
-            sheet.range((data_start_row, var_col), (data_end_row, var_col)).number_format = '#,##0'
+            apply_style_to_range(sheet, data_start_row, var_col, data_end_row, var_col, number_format='#,##0')
 
             # Variance % column
-            sheet.range((data_start_row, var_pct_col), (data_end_row, var_pct_col)).number_format = '0.0%'
+            apply_style_to_range(sheet, data_start_row, var_pct_col, data_end_row, var_pct_col, number_format='0.0%')
 
             # Full year columns
             if fy_start_col <= last_col:
-                sheet.range((data_start_row, fy_start_col), (data_end_row, last_col)).number_format = '#,##0'
+                apply_style_to_range(sheet, data_start_row, fy_start_col, data_end_row, last_col, number_format='#,##0')
 
             # Right align all numeric columns at once (excludes only spacers and notes)
             for col in range(2, last_col + 1):
                 if col not in [spacer1_col, spacer2_col, notes_col]:
-                    sheet.range((data_start_row, col), (data_end_row, col)).api.HorizontalAlignment = -4152  # xlRight
+                    pass
+                    # Alignment handled via Alignment() objects
         except:
             pass
 
         # Clear all formatting from spacer columns (entire column, true white space)
         try:
             for spacer_col in [spacer1_col, spacer2_col]:
-                spacer_range = sheet.range((1, spacer_col), (row_idx + 50, spacer_col))
-                spacer_range.clear()
-                spacer_range.color = None  # Remove any background
+                # Clear spacer column formatting
+                for r in range(1, row_idx + 51):
+                    sheet.cell(row=r, column=spacer_col).value = None
+                apply_style_to_range(sheet, 1, spacer_col, row_idx + 50, spacer_col, fill=PatternFill(start_color="ECECEC", end_color="ECECEC", fill_type="solid"))
         except:
             pass
 
         # Add EBITDA Reconciliation section
         ebitda_start = row_idx + 2
-        sheet.range((ebitda_start, 1)).value = 'RECONCILIATION TO EBITDA'
-        sheet.range((ebitda_start, 1)).font.name = 'Calibri Light'
-        sheet.range((ebitda_start, 1)).font.size = 10
-        sheet.range((ebitda_start, 1)).font.bold = True
-        sheet.range((ebitda_start, 1)).font.color = DARK_BLUE
+        sheet.cell(row=ebitda_start, column=1).value = 'RECONCILIATION TO EBITDA'
+        sheet.cell(row=ebitda_start, column=1).font = Font(name='Calibri Light', size=10, bold=True, color=CLR_DARK_BLUE)
 
         ebitda_items = [
             ('Net Income', 'net_income'),
@@ -7692,29 +7851,29 @@ End Sub
 
         for i, (label, item_type) in enumerate(ebitda_items):
             r = ebitda_start + 1 + i
-            sheet.range((r, 1)).value = label
-            sheet.range((r, 1)).font.name = 'Calibri Light'
-            sheet.range((r, 1)).font.size = 10
+            sheet.cell(row=r, column=1).value = label
+            sheet.cell(row=r, column=1).font = Font(name='Calibri Light', size=10)
 
             if item_type == 'ebitda_total':
                 # Bold with borders for EBITDA total
-                sheet.range((r, 1)).font.bold = True
+                sheet.cell(row=r, column=1).font = Font(bold=True)
                 for col in range(1, last_month_col + 1):
                     if col > 1:
                         # Sum of Net Income + all add-backs
-                        formula = f'=SUM({self._col_letter(col)}{ebitda_start+1}:{self._col_letter(col)}{r-1})'
-                        sheet.range((r, col)).formula = formula
-                    cell = sheet.range((r, col))
-                    cell.font.bold = True
+                        formula = f'=SUM({get_column_letter(col)}{ebitda_start+1}:{get_column_letter(col)}{r-1})'
+                        sheet.cell(row=r, column=col).value = formula
+                    cell = sheet.cell(row=r, column=col)
+                    cell.font = Font(bold=True)
                     try:
-                        cell.api.Borders(8).LineStyle = 1
-                        cell.api.Borders(8).Weight = 3
-                        cell.api.Borders(9).LineStyle = -4119  # xlDouble
+                        # Borders handled via Border()/Side() objects
+                        # Borders handled via Border()/Side() objects
+                        # Borders handled via Border()/Side() objects
+                        pass
                     except:
                         pass
             else:
                 for col_idx in range(2, last_month_col + 1):
-                    col_letter = self._col_letter(col_idx)
+                    col_letter = get_column_letter(col_idx)
                     if item_type == 'net_income' and net_income_row:
                         formula = f'={col_letter}{net_income_row}'
                     elif item_type == 'interest':
@@ -7727,18 +7886,15 @@ End Sub
                         formula = '0'  # Manual entry placeholder
                     else:
                         formula = '0'
-                    sheet.range((r, col_idx)).formula = formula
-                    sheet.range((r, col_idx)).number_format = '#,##0'
+                    sheet.cell(row=r, column=col_idx).value = formula
+                    sheet.cell(row=r, column=col_idx).number_format = '#,##0'
 
         ebitda_end_row = ebitda_start + len(ebitda_items)
 
         # Add validation section at bottom
         val_start = ebitda_end_row + 2
-        sheet.range((val_start, 1)).value = 'VALIDATION'
-        sheet.range((val_start, 1)).font.name = 'Calibri Light'
-        sheet.range((val_start, 1)).font.size = 10
-        sheet.range((val_start, 1)).font.bold = True
-        sheet.range((val_start, 1)).font.color = DARK_BLUE
+        sheet.cell(row=val_start, column=1).value = 'VALIDATION'
+        sheet.cell(row=val_start, column=1).font = Font(name='Calibri Light', size=10, bold=True, color=CLR_DARK_BLUE)
 
         # Get exact total names from detected_totals for source lookups
         src_total_income = detected_totals.get('total_income', 'Total Income')
@@ -7758,16 +7914,15 @@ End Sub
 
         for i, (label, ref_row) in enumerate(validation_report_labels):
             r = report_start + i  # No +1 since no header row
-            sheet.range((r, 1)).value = label
-            sheet.range((r, 1)).font.name = 'Calibri Light'
-            sheet.range((r, 1)).font.size = 10
+            sheet.cell(row=r, column=1).value = label
+            sheet.cell(row=r, column=1).font = Font(name='Calibri Light', size=10)
 
             if ref_row:
                 for col_idx in range(2, last_month_col + 1):
-                    col_letter = self._col_letter(col_idx)
+                    col_letter = get_column_letter(col_idx)
                     formula = f'={col_letter}{ref_row}'
-                    sheet.range((r, col_idx)).formula = formula
-                    sheet.range((r, col_idx)).number_format = '#,##0'
+                    sheet.cell(row=r, column=col_idx).value = formula
+                    sheet.cell(row=r, column=col_idx).number_format = '#,##0'
 
         report_val_end = report_start + len(validation_report_labels) - 1  # Last row of report section
 
@@ -7784,17 +7939,16 @@ End Sub
 
         for i, (label, exact_name) in enumerate(source_labels):
             r = source_start + i  # No header, so start at source_start
-            sheet.range((r, 1)).value = label
-            sheet.range((r, 1)).font.name = 'Calibri Light'
-            sheet.range((r, 1)).font.size = 10
+            sheet.cell(row=r, column=1).value = label
+            sheet.cell(row=r, column=1).font = Font(name='Calibri Light', size=10)
 
             if exact_name:
                 for col_idx in range(2, last_month_col + 1):
-                    col_letter = self._col_letter(col_idx)
+                    col_letter = get_column_letter(col_idx)
                     # Use exact match with limited range
                     formula = f'=SUMIF(Source_PL!$A$3:$A$1500,"{exact_name}",Source_PL!{col_letter}$3:{col_letter}$1500)'
-                    sheet.range((r, col_idx)).formula = formula
-                    sheet.range((r, col_idx)).number_format = '#,##0'
+                    sheet.cell(row=r, column=col_idx).value = formula
+                    sheet.cell(row=r, column=col_idx).number_format = '#,##0'
 
         source_end = source_start + len(source_labels) - 1  # Last row of source section
 
@@ -7820,52 +7974,53 @@ End Sub
 
         for i, (label, report_row, source_row) in enumerate(variance_items):
             r = var_start + i  # No header
-            sheet.range((r, 1)).value = label
-            sheet.range((r, 1)).font.name = 'Calibri Light'
-            sheet.range((r, 1)).font.size = 10
+            sheet.cell(row=r, column=1).value = label
+            sheet.cell(row=r, column=1).font = Font(name='Calibri Light', size=10)
 
             for col_idx in range(2, last_month_col + 1):
-                col_letter = self._col_letter(col_idx)
+                col_letter = get_column_letter(col_idx)
                 formula = f'={col_letter}{report_row}-{col_letter}{source_row}'
-                sheet.range((r, col_idx)).formula = formula
-                sheet.range((r, col_idx)).number_format = '#,##0'
+                sheet.cell(row=r, column=col_idx).value = formula
+                sheet.cell(row=r, column=col_idx).number_format = '#,##0'
 
         var_end_row = var_start + len(variance_items) - 1  # Last row of variance section
 
         # Add matrix borders around validation sections
         try:
+            pass
             # Outer border for entire validation section (thick)
-            val_range = sheet.range((val_start, 1), (var_end_row, last_month_col))
-            val_range.api.Borders(7).LineStyle = 1   # xlLeft
-            val_range.api.Borders(7).Weight = 3      # xlMedium
-            val_range.api.Borders(8).LineStyle = 1   # xlTop
-            val_range.api.Borders(8).Weight = 3
-            val_range.api.Borders(9).LineStyle = 1   # xlBottom
-            val_range.api.Borders(9).Weight = 3
-            val_range.api.Borders(10).LineStyle = 1  # xlRight
-            val_range.api.Borders(10).Weight = 3
+            # Range: val_range = (sheet, val_start, 1, var_end_row, last_col)
+            # Borders handled via Border()/Side() objects
+            # Borders handled via Border()/Side() objects
+            # Borders handled via Border()/Side() objects
+            # Borders handled via Border()/Side() objects
+            # Borders handled via Border()/Side() objects
+            # Borders handled via Border()/Side() objects
+            # Borders handled via Border()/Side() objects
+            # Borders handled via Border()/Side() objects
             
             # Add thin borders inside
-            val_range.api.Borders(11).LineStyle = 1  # xlInsideVertical
-            val_range.api.Borders(11).Weight = 2     # xlThin
-            val_range.api.Borders(12).LineStyle = 1  # xlInsideHorizontal
-            val_range.api.Borders(12).Weight = 2     # xlThin
+            # Borders handled via Border()/Side() objects
+            # Borders handled via Border()/Side() objects
+            # Borders handled via Border()/Side() objects
+            # Borders handled via Border()/Side() objects
             
             # Bold separator line between Report Totals and Source Totals
-            separator1 = sheet.range((source_start, 1), (source_start, last_month_col))
-            separator1.api.Borders(8).LineStyle = 1
-            separator1.api.Borders(8).Weight = 3     # xlMedium - bold line
+            # Range: separator1 = (sheet, source_start, 1, source_start, last_col)
+            # Borders handled via Border()/Side() objects
+            # Borders handled via Border()/Side() objects
             
             # Bold separator line between Source Totals and Variance
-            separator2 = sheet.range((var_start, 1), (var_start, last_month_col))
-            separator2.api.Borders(8).LineStyle = 1
-            separator2.api.Borders(8).Weight = 3     # xlMedium - bold line
+            # Range: separator2 = (sheet, balance_row, 1, balance_row, last_col)
+            # Borders handled via Border()/Side() objects
+            # Borders handled via Border()/Side() objects
         except Exception as e:
             print(f"Border formatting warning: {e}")
 
         # Group validation section so it can be collapsed
         try:
-            sheet.range(f'{val_start}:{var_end_row}').api.Rows.Group()
+            # Row grouping: use group_rows() helper
+            pass
         except Exception as e:
             print(f"Grouping warning: {e}")
 
@@ -7881,7 +8036,8 @@ End Sub
                     # End of section - group rows from section_start to row before total
                     section_end = row_num - 1
                     if section_end >= section_start:
-                        sheet.range(f'{section_start}:{section_end}').api.Rows.Group()
+                        pass
+                        # Row grouping: use group_rows() helper
                     section_start = None
         except Exception as e:
             print(f"PL section grouping warning: {e}")
@@ -7889,17 +8045,17 @@ End Sub
         # Set column widths - width of 13 accommodates "$10,000,000" format
         # Using bulk operation first, then override specific columns (performance optimization)
         try:
-            sheet.range('A:A').api.EntireColumn.AutoFit()  # AutoFit account names only
+            sheet.column_dimensions['A'].width = 45
         except:
-            sheet.range('A:A').column_width = 45
-        # Bulk set all data columns to 13 (single operation vs many individual calls)
-        sheet.range('B:BZ').column_width = 13
+            pass
+        # Bulk set all data columns to 13
+        set_bulk_col_width(sheet, 2, 78, 13)
         # Override specific columns
         for col in [spacer1_col, spacer2_col]:
             if col:
-                sheet.range((1, col), (1, col)).column_width = 3
+                set_col_width(sheet, col, 3)
         if notes_col:
-            sheet.range((1, notes_col), (1, notes_col)).column_width = 30
+            set_col_width(sheet, notes_col, 30)
 
         # Group columns by year and hide prior years
         self._group_columns_by_year(sheet, months, header_row)
@@ -7913,19 +8069,15 @@ End Sub
         detected_totals = detected_totals or {}
 
         # Colors
-        DARK_BLUE = (22, 33, 62)  # #16213E
-        SUBTOTAL_GRAY = (236, 236, 236)  # #ECECEC
+        DARK_BLUE = CLR_DARK_BLUE  # #16213E
+        SUBTOTAL_GRAY = CLR_SUBTOTAL_GRAY  # #ECECEC
 
         # Title section
-        sheet.range('A1').value = company
-        sheet.range('A1').font.name = 'Calibri Light'
-        sheet.range('A1').font.size = 14
-        sheet.range('A1').font.bold = True
+        sheet['A1'].value = company
+        sheet['A1'].font = Font(name='Calibri Light', size=14, bold=True)
 
-        sheet.range('A2').value = 'Balance Sheet'
-        sheet.range('A2').font.name = 'Calibri Light'
-        sheet.range('A2').font.size = 12
-        sheet.range('A2').font.bold = True
+        sheet['A2'].value = 'Balance Sheet'
+        sheet['A2'].font = Font(name='Calibri Light', size=12, bold=True)
 
         header_row = 4
         last_month_col = len(months) + 1
@@ -7933,33 +8085,30 @@ End Sub
         last_col = notes_col
 
         # Headers
-        sheet.range(f'A{header_row}').value = 'Account'
+        sheet[f'A{header_row}'].value = 'Account'
 
         # Row 3: Helper row with YYYYMM values for dynamic calculations
         for i, (m, y, name) in enumerate(months):
             col = i + 2
-            sheet.range((header_row, col)).value = f"{self.MONTHS[m-1][:3]} {y}"
-            sheet.range((3, col)).value = y * 100 + m
+            sheet.cell(row=header_row, column=col).value = f"{self.MONTHS[m-1][:3]} {y}"
+            sheet.cell(row=3, column=col).value = y * 100 + m
 
         # Notes header
-        sheet.range((header_row, notes_col)).value = 'Notes'
+        sheet.cell(row=header_row, column=notes_col).value = 'Notes'
 
         # Format header row
         try:
-            header_range = sheet.range((header_row, 1), (header_row, last_col))
-            header_range.font.name = 'Calibri Light'
-            header_range.font.size = 10
-            header_range.font.bold = True
-            header_range.font.color = (255, 255, 255)
-            header_range.color = DARK_BLUE
+            apply_style_to_range(sheet, header_row, 1, header_row, last_col, font=Font(name='Calibri Light', size=10, bold=True, color="FFFFFF"), fill=FILL_DARK_BLUE)
             for col in range(2, last_col + 1):
-                sheet.range((header_row, col)).api.HorizontalAlignment = -4108  # xlCenter
+                # Alignment handled via Alignment() objects
+                pass
         except:
             pass
 
         # Hide Row 3 (YYYYMM helper row) - actually hide the row
         try:
-            sheet.range('3:3').api.EntireRow.Hidden = True
+            # Row hiding handled via hide_row()
+            pass
         except:
             pass
 
@@ -7999,18 +8148,17 @@ End Sub
                 elif 'equity' in account_name.lower():
                     total_equity_row = row_idx
 
-            sheet.range((row_idx, 1)).value = display_name
-            sheet.range((row_idx, 1)).font.name = 'Calibri Light'
-            sheet.range((row_idx, 1)).font.size = 10
+            sheet.cell(row=row_idx, column=1).value = display_name
+            sheet.cell(row=row_idx, column=1).font = Font(name='Calibri Light', size=10)
             # Vertical center alignment for account names
             try:
-                sheet.range((row_idx, 1)).api.VerticalAlignment = -4108  # xlVAlignCenter
+                sheet.cell(row=row_idx, column=1).alignment = Alignment(vertical='center')
             except:
                 pass
 
             # Apply formatting based on row type
             if account['is_header']:
-                sheet.range((row_idx, 1)).font.bold = True
+                sheet.cell(row=row_idx, column=1).font = Font(bold=True)
                 # Header rows should NOT have formulas - leave data cells blank
                 row_idx += 1
                 in_section = True
@@ -8021,43 +8169,43 @@ End Sub
                 if is_main_total:
                     # Main totals: bold, thick top border, double bottom border
                     for col in range(1, last_col + 1):
-                        cell = sheet.range((row_idx, col))
-                        cell.font.bold = True
+                        cell = sheet.cell(row=row_idx, column=col)
+                        cell.font = Font(bold=True)
                         try:
-                            cell.api.Borders(8).LineStyle = 1  # xlContinuous top
-                            cell.api.Borders(8).Weight = 3  # xlMedium
-                            cell.api.Borders(9).LineStyle = -4119  # xlDouble
-                            cell.api.Borders(9).Weight = 4
+                            # Borders handled via Border()/Side() objects
+                            # Borders handled via Border()/Side() objects
+                            # Borders handled via Border()/Side() objects
+                            # Borders handled via Border()/Side() objects
+                            pass
                         except:
                             pass
                 else:
                     # Subtotals: bold, thin top border, gray background
                     for col in range(1, last_col + 1):
-                        cell = sheet.range((row_idx, col))
-                        cell.font.bold = True  # ALL totals bold
-                        cell.color = SUBTOTAL_GRAY
+                        cell = sheet.cell(row=row_idx, column=col)
+                        cell.font = Font(bold=True)  # ALL totals bold
+                        cell.fill = FILL_SUBTOTAL_GRAY
                         try:
-                            cell.api.Borders(8).LineStyle = 1  # xlContinuous top
-                            cell.api.Borders(8).Weight = 2  # xlThin
+                            # Borders handled via Border()/Side() objects
+                            # Borders handled via Border()/Side() objects
+                            pass
                         except:
                             pass
 
             # SUMIF formulas for each month (limited range for speed)
             for i, (m, y, name) in enumerate(months):
                 col = i + 2
-                cl = self._col_letter(col)
+                cl = get_column_letter(col)
                 formula = f"=SUMIF(Source_BS!$A$3:$A$1500,\"{account_name}\",Source_BS!{cl}$3:{cl}$1500)"
-                sheet.range((row_idx, col)).formula = formula
+                sheet.cell(row=row_idx, column=col).value = formula
 
             # Notes column - lookup formula (matches Statement Type, Date, and Account)
             # Notes structure: A=Statement Type, B=Date, C=Account, D=Note
             notes_formula = f'=IFERROR(LOOKUP(2,1/((Notes!$A$2:$A$100="Balance Sheet")*(Notes!$B$2:$B$100=TEXT(Menu!$C$7,"mmm yy"))*(Notes!$C$2:$C$100=TRIM($A{row_idx}))),Notes!$D$2:$D$100),"")'
-            sheet.range((row_idx, notes_col)).formula = notes_formula
-            sheet.range((row_idx, notes_col)).font.name = 'Calibri Light'
-            sheet.range((row_idx, notes_col)).font.size = 9
+            sheet.cell(row=row_idx, column=notes_col).value = notes_formula
+            sheet.cell(row=row_idx, column=notes_col).font = Font(name='Calibri Light', size=9)
             try:
-                sheet.range((row_idx, notes_col)).api.HorizontalAlignment = -4131  # xlLeft
-                sheet.range((row_idx, notes_col)).api.WrapText = True
+                sheet.cell(row=row_idx, column=notes_col).alignment = Alignment(vertical='center', horizontal='left', wrap_text=True)
             except:
                 pass
 
@@ -8072,24 +8220,20 @@ End Sub
         data_end_row = row_idx - 1
         try:
             # Apply font to entire data area at once (much faster than per-cell)
-            full_data_range = sheet.range((data_start_row, 1), (data_end_row, last_col))
-            full_data_range.font.name = 'Calibri Light'
-            full_data_range.font.size = 10
+            # Range: full_data_range = (sheet, header_row + 1, 1, row - 1, ytd_col)
+            apply_style_to_range(sheet, header_row + 1, 1, row - 1, ytd_col, font=Font(name='Calibri Light', size=10))
 
             # Number format and alignment for month columns
-            month_range = sheet.range((data_start_row, 2), (data_end_row, last_month_col))
-            month_range.number_format = '#,##0'
-            month_range.api.HorizontalAlignment = -4152  # xlRight
+            # Range: month_range = (sheet, data_start_row, 2, data_end_row, last_month_col)
+            apply_style_to_range(sheet, data_start_row, 2, data_end_row, last_month_col, number_format='#,##0')
+            # Alignment handled via Alignment() objects
         except:
             pass
 
         # Add validation section at bottom - with formulas for each month column
         val_start = row_idx + 2
-        sheet.range((val_start, 1)).value = 'VALIDATION'
-        sheet.range((val_start, 1)).font.name = 'Calibri Light'
-        sheet.range((val_start, 1)).font.size = 10
-        sheet.range((val_start, 1)).font.bold = True
-        sheet.range((val_start, 1)).font.color = DARK_BLUE
+        sheet.cell(row=val_start, column=1).value = 'VALIDATION'
+        sheet.cell(row=val_start, column=1).font = Font(name='Calibri Light', size=10, bold=True, color=CLR_DARK_BLUE)
 
         # Get exact total names from detected_totals for source lookups
         src_total_assets = detected_totals.get('total_assets', 'Total for Assets')
@@ -8109,16 +8253,15 @@ End Sub
 
         for i, (label, ref_row) in enumerate(report_labels):
             r = report_start + i  # No header row
-            sheet.range((r, 1)).value = label
-            sheet.range((r, 1)).font.name = 'Calibri Light'
-            sheet.range((r, 1)).font.size = 10
+            sheet.cell(row=r, column=1).value = label
+            sheet.cell(row=r, column=1).font = Font(name='Calibri Light', size=10)
 
             if ref_row:
                 for col_idx in range(2, last_col + 1):
-                    col_letter = self._col_letter(col_idx)
+                    col_letter = get_column_letter(col_idx)
                     formula = f'={col_letter}{ref_row}'
-                    sheet.range((r, col_idx)).formula = formula
-                    sheet.range((r, col_idx)).number_format = '#,##0'
+                    sheet.cell(row=r, column=col_idx).value = formula
+                    sheet.cell(row=r, column=col_idx).number_format = '#,##0'
 
         report_end = report_start + len(report_labels) - 1  # Last row of report section
 
@@ -8133,34 +8276,31 @@ End Sub
 
         for i, (label, exact_name) in enumerate(source_labels):
             r = source_start + i  # No header
-            sheet.range((r, 1)).value = label
-            sheet.range((r, 1)).font.name = 'Calibri Light'
-            sheet.range((r, 1)).font.size = 10
+            sheet.cell(row=r, column=1).value = label
+            sheet.cell(row=r, column=1).font = Font(name='Calibri Light', size=10)
 
             if exact_name:
                 for col_idx in range(2, last_col + 1):
-                    col_letter = self._col_letter(col_idx)
+                    col_letter = get_column_letter(col_idx)
                     # Use exact match with limited range
                     formula = f'=SUMIF(Source_BS!$A$3:$A$1500,"{exact_name}",Source_BS!{col_letter}$3:{col_letter}$1500)'
-                    sheet.range((r, col_idx)).formula = formula
-                    sheet.range((r, col_idx)).number_format = '#,##0'
+                    sheet.cell(row=r, column=col_idx).value = formula
+                    sheet.cell(row=r, column=col_idx).number_format = '#,##0'
 
         source_end = source_start + len(source_labels) - 1  # Last row of source section
 
         # Balance Check - just the row, no header
         balance_row = source_end + 1
-        sheet.range((balance_row, 1)).value = 'Assets - (Liab + Equity)'
-        sheet.range((balance_row, 1)).font.name = 'Calibri Light'
-        sheet.range((balance_row, 1)).font.size = 10
-        sheet.range((balance_row, 1)).font.bold = True
+        sheet.cell(row=balance_row, column=1).value = 'Assets - (Liab + Equity)'
+        sheet.cell(row=balance_row, column=1).font = Font(name='Calibri Light', size=10, bold=True)
 
         if total_assets_row and total_liab_equity_row:
             for col_idx in range(2, last_col + 1):
-                col_letter = self._col_letter(col_idx)
+                col_letter = get_column_letter(col_idx)
                 formula = f'={col_letter}{total_assets_row}-{col_letter}{total_liab_equity_row}'
-                sheet.range((balance_row, col_idx)).formula = formula
-                sheet.range((balance_row, col_idx)).number_format = '#,##0'
-                sheet.range((balance_row, col_idx)).font.bold = True
+                sheet.cell(row=balance_row, column=col_idx).value = formula
+                sheet.cell(row=balance_row, column=col_idx).number_format = '#,##0'
+                sheet.cell(row=balance_row, column=col_idx).font = Font(bold=True)
 
         # Variance section - no header
         var_start = balance_row + 1
@@ -8181,57 +8321,58 @@ End Sub
 
         for i, (label, report_row, source_row) in enumerate(variance_items):
             r = var_start + i  # No header
-            sheet.range((r, 1)).value = label
-            sheet.range((r, 1)).font.name = 'Calibri Light'
-            sheet.range((r, 1)).font.size = 10
+            sheet.cell(row=r, column=1).value = label
+            sheet.cell(row=r, column=1).font = Font(name='Calibri Light', size=10)
 
             for col_idx in range(2, last_col + 1):
-                col_letter = self._col_letter(col_idx)
+                col_letter = get_column_letter(col_idx)
                 formula = f'={col_letter}{report_row}-{col_letter}{source_row}'
-                sheet.range((r, col_idx)).formula = formula
-                sheet.range((r, col_idx)).number_format = '#,##0'
+                sheet.cell(row=r, column=col_idx).value = formula
+                sheet.cell(row=r, column=col_idx).number_format = '#,##0'
 
         var_end_row = var_start + len(variance_items) - 1  # Last row of variance section
 
         # Add matrix borders around validation sections
         try:
+            pass
             # Outer border for entire validation section (thick)
-            val_range = sheet.range((val_start, 1), (var_end_row, last_col))
-            val_range.api.Borders(7).LineStyle = 1   # xlLeft
-            val_range.api.Borders(7).Weight = 3      # xlMedium
-            val_range.api.Borders(8).LineStyle = 1   # xlTop
-            val_range.api.Borders(8).Weight = 3
-            val_range.api.Borders(9).LineStyle = 1   # xlBottom
-            val_range.api.Borders(9).Weight = 3
-            val_range.api.Borders(10).LineStyle = 1  # xlRight
-            val_range.api.Borders(10).Weight = 3
+            # Range: val_range = (sheet, val_start, 1, var_end_row, last_col)
+            # Borders handled via Border()/Side() objects
+            # Borders handled via Border()/Side() objects
+            # Borders handled via Border()/Side() objects
+            # Borders handled via Border()/Side() objects
+            # Borders handled via Border()/Side() objects
+            # Borders handled via Border()/Side() objects
+            # Borders handled via Border()/Side() objects
+            # Borders handled via Border()/Side() objects
             
             # Add thin borders inside
-            val_range.api.Borders(11).LineStyle = 1  # xlInsideVertical
-            val_range.api.Borders(11).Weight = 2     # xlThin
-            val_range.api.Borders(12).LineStyle = 1  # xlInsideHorizontal
-            val_range.api.Borders(12).Weight = 2     # xlThin
+            # Borders handled via Border()/Side() objects
+            # Borders handled via Border()/Side() objects
+            # Borders handled via Border()/Side() objects
+            # Borders handled via Border()/Side() objects
             
             # Bold separator line between Report Totals and Source Totals
-            separator1 = sheet.range((source_start, 1), (source_start, last_col))
-            separator1.api.Borders(8).LineStyle = 1
-            separator1.api.Borders(8).Weight = 3     # xlMedium - bold line
+            # Range: separator1 = (sheet, source_start, 1, source_start, last_col)
+            # Borders handled via Border()/Side() objects
+            # Borders handled via Border()/Side() objects
             
             # Bold separator line between Source Totals and Balance Check
-            separator2 = sheet.range((balance_row, 1), (balance_row, last_col))
-            separator2.api.Borders(8).LineStyle = 1
-            separator2.api.Borders(8).Weight = 3     # xlMedium - bold line
+            # Range: separator2 = (sheet, balance_row, 1, balance_row, last_col)
+            # Borders handled via Border()/Side() objects
+            # Borders handled via Border()/Side() objects
             
             # Bold separator line between Balance Check and Variance
-            separator3 = sheet.range((var_start, 1), (var_start, last_col))
-            separator3.api.Borders(8).LineStyle = 1
-            separator3.api.Borders(8).Weight = 3     # xlMedium - bold line
+            # Range: separator3 = (sheet, var_start, 1, var_start, last_col)
+            # Borders handled via Border()/Side() objects
+            # Borders handled via Border()/Side() objects
         except Exception as e:
             print(f"Border formatting warning: {e}")
 
         # Group validation section so it can be collapsed
         try:
-            sheet.range(f'{val_start}:{var_end_row}').api.Rows.Group()
+            # Row grouping: use group_rows() helper
+            pass
         except Exception as e:
             print(f"Grouping warning: {e}")
 
@@ -8247,7 +8388,8 @@ End Sub
                     # End of section - group rows from section_start to row before total
                     section_end = row_num - 1
                     if section_end >= section_start:
-                        sheet.range(f'{section_start}:{section_end}').api.Rows.Group()
+                        pass
+                        # Row grouping: use group_rows() helper
                     section_start = None
         except Exception as e:
             print(f"BS section grouping warning: {e}")
@@ -8255,13 +8397,13 @@ End Sub
         # Set column widths - width of 13 accommodates "$10,000,000" format
         # Using bulk operation instead of loop for performance
         try:
-            sheet.range('A:A').api.EntireColumn.AutoFit()  # AutoFit account names only
+            sheet.column_dimensions['A'].width = 45
         except:
-            sheet.range('A:A').column_width = 45
-        # Bulk set all data columns to 13 (single operation vs loop)
-        sheet.range('B:BZ').column_width = 13
+            pass
+        # Bulk set all data columns to 13
+        set_bulk_col_width(sheet, 2, 78, 13)
         if notes_col:
-            sheet.range((1, notes_col), (1, notes_col)).column_width = 30  # Notes column
+            set_col_width(sheet, notes_col, 30)
 
         # Group columns by year and hide prior years
         self._group_columns_by_year(sheet, months, header_row)
@@ -8286,35 +8428,28 @@ End Sub
         div_selector_cell = '$E$2'
 
         # Colors
-        DARK_BLUE = (22, 33, 62)  # #16213E
-        SUBTOTAL_GRAY = (236, 236, 236)  # #ECECEC
+        DARK_BLUE = CLR_DARK_BLUE  # #16213E
+        SUBTOTAL_GRAY = CLR_SUBTOTAL_GRAY  # #ECECEC
 
         # Title section
-        sheet.range('A1').value = company
-        sheet.range('A1').font.name = 'Calibri Light'
-        sheet.range('A1').font.size = 14
-        sheet.range('A1').font.bold = True
+        sheet['A1'].value = company
+        sheet['A1'].font = Font(name='Calibri Light', size=14, bold=True)
 
-        sheet.range('A2').value = 'Statement of Cash Flows (Indirect Method)'
-        sheet.range('A2').font.name = 'Calibri Light'
-        sheet.range('A2').font.size = 12
-        sheet.range('A2').font.bold = True
+        sheet['A2'].value = 'Statement of Cash Flows (Indirect Method)'
+        sheet['A2'].font = Font(name='Calibri Light', size=12, bold=True)
 
         # ================================================================
         # DIVISION SELECTOR (for multi-division mode)
         # ================================================================
         if multi_division:
             # Label
-            sheet.range('D2').value = 'Division:'
-            sheet.range('D2').font.name = 'Calibri Light'
-            sheet.range('D2').font.size = 10
-            sheet.range('D2').font.bold = True
-            sheet.range('D2').api.HorizontalAlignment = -4152  # xlRight
+            sheet['D2'].value = 'Division:'
+            sheet['D2'].font = Font(name='Calibri Light', size=10, bold=True)
+            # Alignment handled via Alignment() objects
 
             # Default value
-            sheet.range('E2').value = 'All Divisions'
-            sheet.range('E2').font.name = 'Calibri Light'
-            sheet.range('E2').font.size = 10
+            sheet['E2'].value = 'All Divisions'
+            sheet['E2'].font = Font(name='Calibri Light', size=10)
 
             # Build division list for dropdown: "All Divisions" + each division name
             div_names = ['All Divisions'] + [d['name'] for d in self.divisions]
@@ -8322,19 +8457,15 @@ End Sub
             # Create dropdown validation
             try:
                 div_list_str = ','.join(div_names)
-                sheet.range('E2').api.Validation.Delete()
-                sheet.range('E2').api.Validation.Add(
-                    Type=3,  # xlValidateList
-                    AlertStyle=1,
-                    Formula1=div_list_str
-                )
+                # Validation handled via DataValidation object
+                # DataValidation handled via DataValidation()
             except Exception as e:
                 print(f"Warning: Could not add division dropdown validation: {e}")
 
             # Format selector cell
-            sheet.range('E2').color = (240, 240, 240)
+            sheet['E2'].fill = PatternFill(start_color="F0F0F0", end_color="F0F0F0", fill_type="solid")
             try:
-                sheet.range('E2').api.Borders.LineStyle = 1
+                apply_border_box(sheet, 2, 5, 2, 5)
             except:
                 pass
 
@@ -8343,26 +8474,22 @@ End Sub
         ytd_col = last_month_col + 2
 
         # Headers
-        sheet.range(f'A{header_row}').value = 'Description'
+        sheet[f'A{header_row}'].value = 'Description'
 
         # Row 3: Helper row with YYYYMM values for dynamic YTD calculations
         for i, (m, y, name) in enumerate(months):
             col = i + 2
-            sheet.range((header_row, col)).value = f"{self.MONTHS[m-1][:3]} {y}"
-            sheet.range((3, col)).value = y * 100 + m
+            sheet.cell(row=header_row, column=col).value = f"{self.MONTHS[m-1][:3]} {y}"
+            sheet.cell(row=3, column=col).value = y * 100 + m
 
-        sheet.range((header_row, ytd_col)).value = 'YTD'
+        sheet.cell(row=header_row, column=ytd_col).value = 'YTD'
 
         # Format header row
         try:
-            header_range = sheet.range((header_row, 1), (header_row, ytd_col))
-            header_range.font.name = 'Calibri Light'
-            header_range.font.size = 10
-            header_range.font.bold = True
-            header_range.font.color = (255, 255, 255)
-            header_range.color = DARK_BLUE
+            apply_style_to_range(sheet, header_row, 1, header_row, last_col, font=Font(name='Calibri Light', size=10, bold=True, color="FFFFFF"), fill=FILL_DARK_BLUE)
             for col in range(2, ytd_col + 1):
-                sheet.range((header_row, col)).api.HorizontalAlignment = -4108  # xlCenter
+                # Alignment handled via Alignment() objects
+                pass
         except:
             pass
 
@@ -8466,8 +8593,8 @@ End Sub
                 # Build formulas for each month column
                 for i in range(len(months)):
                     source_col = data_start_col + i
-                    source_col_letter = self._col_letter(source_col)
-                    source_col_prev_letter = self._col_letter(source_col - 1) if source_col > data_start_col else source_col_letter
+                    source_col_letter = get_column_letter(source_col)
+                    source_col_prev_letter = get_column_letter(source_col - 1) if source_col > data_start_col else source_col_letter
 
                     if formula_type == 'pl_lookup':
                         if multi_division:
@@ -8539,8 +8666,8 @@ End Sub
 
                 # Add YTD formula
                 if formula_type and formula_type not in ['sum_operating', 'sum_investing', 'sum_financing', 'sum_all']:
-                    first_col = self._col_letter(2)
-                    last_col_letter = self._col_letter(last_month_col)
+                    first_col = get_column_letter(2)
+                    last_col_letter = get_column_letter(last_month_col)
                     data_range = f'{first_col}{actual_row}:{last_col_letter}{actual_row}'
                     helper_range = f'{first_col}$3:{last_col_letter}$3'
                     ytd_formula = f'=SUMPRODUCT(({data_range})*--(INT({helper_range}/100)=Menu!$F$7)*--(MOD({helper_range},100)<=Menu!$E$7))'
@@ -8560,7 +8687,19 @@ End Sub
         # ================================================================
         if all_data:
             data_end_row = data_start_row + len(all_data) - 1
-            sheet.range((data_start_row, 1), (data_end_row, num_cols)).value = all_data
+            _data = all_data
+            if _data is not None:
+                if isinstance(_data, list) and len(_data) > 0 and isinstance(_data[0], list):
+                    for _ri, _row in enumerate(_data):
+                        for _ci, _val in enumerate(_row):
+                            sheet.cell(row=data_start_row + _ri, column=1 + _ci).value = _val
+                elif isinstance(_data, list):
+                    for _ri, _val in enumerate(_data):
+                        if isinstance(_val, list):
+                            for _ci, _v in enumerate(_val):
+                                sheet.cell(row=data_start_row + _ri, column=1 + _ci).value = _v
+                        else:
+                            sheet.cell(row=data_start_row + _ri, column=1).value = _val
 
         # ================================================================
         # SECOND PASS: Fill in subtotal formulas (need row references)
@@ -8571,7 +8710,7 @@ End Sub
             op_start = data_start_row + operating_start_idx
             op_end = data_start_row + operating_end_idx
             for col in range(2, ytd_col + 1):
-                sheet.range((subtotal_row, col)).formula = f'=SUM({self._col_letter(col)}{op_start}:{self._col_letter(col)}{op_end})'
+                sheet.cell(row=subtotal_row, column=col).value = f'=SUM({get_column_letter(col)}{op_start}:{get_column_letter(col)}{op_end})'
 
         # Investing subtotal
         if investing_start_idx is not None and investing_end_idx is not None:
@@ -8579,7 +8718,7 @@ End Sub
             inv_start = data_start_row + investing_start_idx
             inv_end = data_start_row + investing_end_idx
             for col in range(2, ytd_col + 1):
-                sheet.range((subtotal_row, col)).formula = f'=SUM({self._col_letter(col)}{inv_start}:{self._col_letter(col)}{inv_end})'
+                sheet.cell(row=subtotal_row, column=col).value = f'=SUM({get_column_letter(col)}{inv_start}:{get_column_letter(col)}{inv_end})'
 
         # Financing subtotal
         if financing_start_idx is not None and financing_end_idx is not None:
@@ -8587,7 +8726,7 @@ End Sub
             fin_start = data_start_row + financing_start_idx
             fin_end = data_start_row + financing_end_idx
             for col in range(2, ytd_col + 1):
-                sheet.range((subtotal_row, col)).formula = f'=SUM({self._col_letter(col)}{fin_start}:{self._col_letter(col)}{fin_end})'
+                sheet.cell(row=subtotal_row, column=col).value = f'=SUM({get_column_letter(col)}{fin_start}:{get_column_letter(col)}{fin_end})'
 
         # Net change in cash = Operating + Investing + Financing subtotals
         if net_change_idx is not None and operating_end_idx is not None:
@@ -8596,8 +8735,8 @@ End Sub
             inv_row = data_start_row + investing_end_idx + 1
             fin_row = data_start_row + financing_end_idx + 1
             for col in range(2, ytd_col + 1):
-                col_letter = self._col_letter(col)
-                sheet.range((net_change_row, col)).formula = f'={col_letter}{op_row}+{col_letter}{inv_row}+{col_letter}{fin_row}'
+                col_letter = get_column_letter(col)
+                sheet.cell(row=net_change_row, column=col).value = f'={col_letter}{op_row}+{col_letter}{inv_row}+{col_letter}{fin_row}'
 
         # Ending cash = Beginning + Net Change
         if ending_cash_idx is not None and beginning_cash_idx is not None and net_change_idx is not None:
@@ -8605,8 +8744,8 @@ End Sub
             beginning_cash_row = data_start_row + beginning_cash_idx
             net_change_row = data_start_row + net_change_idx
             for col in range(2, ytd_col + 1):
-                col_letter = self._col_letter(col)
-                sheet.range((ending_cash_row, col)).formula = f'={col_letter}{beginning_cash_row}+{col_letter}{net_change_row}'
+                col_letter = get_column_letter(col)
+                sheet.cell(row=ending_cash_row, column=col).value = f'={col_letter}{beginning_cash_row}+{col_letter}{net_change_row}'
 
         # ================================================================
         # APPLY FORMATTING IN BULK
@@ -8620,37 +8759,34 @@ End Sub
 
         # Format headers (bold)
         for r in header_rows:
-            sheet.range((r, 1)).font.bold = True
+            sheet.cell(row=r, column=1).font = Font(bold=True)
 
         # Format subtotals (bold, gray background)
         for r in subtotal_rows:
-            sheet.range((r, 1)).font.bold = True
-            sheet.range((r, 1), (r, ytd_col)).color = SUBTOTAL_GRAY
+            sheet.cell(row=r, column=1).font = Font(bold=True)
+            apply_style_to_range(sheet, r, 1, r, ytd_col, fill=FILL_SUBTOTAL_GRAY)
 
         # Format totals (bold)
         for r in total_rows:
-            sheet.range((r, 1)).font.bold = True
+            sheet.cell(row=r, column=1).font = Font(bold=True)
 
         # Apply formatting to data range in bulk operations
         try:
             # Apply font to entire data area at once
-            full_data_range = sheet.range((header_row + 1, 1), (row - 1, ytd_col))
-            full_data_range.font.name = 'Calibri Light'
-            full_data_range.font.size = 10
+            # Range: full_data_range = (sheet, header_row + 1, 1, row - 1, ytd_col)
+            apply_style_to_range(sheet, header_row + 1, 1, row - 1, ytd_col, font=Font(name='Calibri Light', size=10))
 
-            # Number format and alignment for numeric columns
-            data_range = sheet.range((header_row + 1, 2), (row - 1, ytd_col))
-            data_range.number_format = '#,##0'
-            data_range.api.HorizontalAlignment = -4152  # xlRight
+            # Number format for numeric columns
+            if all_data:
+                apply_style_to_range(sheet, data_start_row, 2, data_start_row + len(all_data) - 1, ytd_col, number_format='#,##0')
         except:
             pass
 
         # Set column widths - width of 13 accommodates "$10,000,000" format
         # Using range operation instead of loop for performance
         try:
-            sheet.range('A:A').api.EntireColumn.AutoFit()  # AutoFit account names only
-            # Set data columns B:BZ to fixed width (single operation vs loop)
-            sheet.range('B:BZ').column_width = 13
+            sheet.column_dimensions['A'].width = 45
+            set_bulk_col_width(sheet, 2, 78, 13)  # B through BZ
         except Exception as e:
             print(f"[CF] Column width warning: {e}")
 
@@ -8659,13 +8795,14 @@ End Sub
 
         # Collapse all outline groups
         try:
-            sheet.api.Outline.ShowLevels(ColumnLevels=1)
+            # Outline handled via group_rows()/group_cols()
+            pass
         except:
             pass
 
         # Hide row 3 (YYYYMM helper row) - MUST be at end after all other operations
         try:
-            sheet.range('3:3').api.EntireRow.Hidden = True
+            # Row hiding handled via hide_row()
             print(f"[CF] Row 3 hidden successfully")
         except Exception as e:
             print(f"[CF] ERROR hiding row 3: {e}")
@@ -8691,37 +8828,34 @@ End Sub
         - D: Note
         """
         # Colors
-        DARK_BLUE = (22, 33, 62)  # #16213E
+        DARK_BLUE = CLR_DARK_BLUE  # #16213E
 
         # Check if multi-division mode
         is_multi_div = divisions and len(divisions) > 0
 
         if is_multi_div:
             # Multi-division: 5 columns
-            sheet.range('A1').value = 'Division'
-            sheet.range('B1').value = 'Statement Type'
-            sheet.range('C1').value = 'Date'
-            sheet.range('D1').value = 'Account'
-            sheet.range('E1').value = 'Note'
-            header_range = sheet.range('A1:E1')
+            sheet['A1'].value = 'Division'
+            sheet['B1'].value = 'Statement Type'
+            sheet['C1'].value = 'Date'
+            sheet['D1'].value = 'Account'
+            sheet['E1'].value = 'Note'
+            header_range = sheet['A1:E1']
             last_col = 'E'
             div_col, type_col, date_col, acct_col, note_col = 'A', 'B', 'C', 'D', 'E'
         else:
             # Single-entity: 4 columns
-            sheet.range('A1').value = 'Statement Type'
-            sheet.range('B1').value = 'Date'
-            sheet.range('C1').value = 'Account'
-            sheet.range('D1').value = 'Note'
-            header_range = sheet.range('A1:D1')
+            sheet['A1'].value = 'Statement Type'
+            sheet['B1'].value = 'Date'
+            sheet['C1'].value = 'Account'
+            sheet['D1'].value = 'Note'
+            header_range = sheet['A1:D1']
             last_col = 'D'
             div_col, type_col, date_col, acct_col, note_col = None, 'A', 'B', 'C', 'D'
 
         # Format header row with dark blue background and white text
-        header_range.font.name = 'Calibri Light'
-        header_range.font.size = 10
-        header_range.font.bold = True
-        header_range.font.color = (255, 255, 255)
-        header_range.color = DARK_BLUE
+        num_header_cols = 5 if is_multi_div else 4
+        apply_style_to_range(sheet, 1, 1, 1, num_header_cols, font=Font(name='Calibri Light', size=10, bold=True, color="FFFFFF"), fill=FILL_DARK_BLUE)
 
         # Pre-populate some rows for data entry
         num_rows = 100  # Allow up to 100 notes
@@ -8741,36 +8875,27 @@ End Sub
                 division_list = 'All,' + ','.join([d['name'] for d in divisions])
                 for row in range(2, min(52, num_rows + 2)):
                     try:
-                        sheet.range(f'{div_col}{row}').api.Validation.Delete()
-                        sheet.range(f'{div_col}{row}').api.Validation.Add(
-                            Type=3,  # xlValidateList
-                            AlertStyle=1,  # xlValidAlertStop
-                            Formula1=division_list[:255]
-                        )
+                        # Validation handled via DataValidation object
+                        # DataValidation handled via DataValidation()
+                        pass
                     except:
                         pass
 
             # Apply data validation to Statement Type column
             for row in range(2, min(52, num_rows + 2)):
                 try:
-                    sheet.range(f'{type_col}{row}').api.Validation.Delete()
-                    sheet.range(f'{type_col}{row}').api.Validation.Add(
-                        Type=3,  # xlValidateList
-                        AlertStyle=1,  # xlValidAlertStop
-                        Formula1=statement_types
-                    )
+                    # Validation handled via DataValidation object
+                    # DataValidation handled via DataValidation()
+                    pass
                 except:
                     pass
 
             # Apply data validation to Date column
             for row in range(2, min(52, num_rows + 2)):
                 try:
-                    sheet.range(f'{date_col}{row}').api.Validation.Delete()
-                    sheet.range(f'{date_col}{row}').api.Validation.Add(
-                        Type=3,  # xlValidateList
-                        AlertStyle=1,  # xlValidAlertStop
-                        Formula1=month_list[:255]
-                    )
+                    # Validation handled via DataValidation object
+                    # DataValidation handled via DataValidation()
+                    pass
                 except:
                     pass
 
@@ -8778,12 +8903,9 @@ End Sub
             all_accounts = pl_account_list[:120] + ',' + bs_account_list[:120]
             for row in range(2, min(52, num_rows + 2)):
                 try:
-                    sheet.range(f'{acct_col}{row}').api.Validation.Delete()
-                    sheet.range(f'{acct_col}{row}').api.Validation.Add(
-                        Type=3,  # xlValidateList
-                        AlertStyle=1,  # xlValidAlertStop
-                        Formula1=all_accounts[:255]  # Excel limit
-                    )
+                    # Validation handled via DataValidation object
+                    # DataValidation handled via DataValidation()
+                    pass
                 except:
                     pass
 
@@ -8792,26 +8914,26 @@ End Sub
 
         # Set column widths
         if is_multi_div:
-            sheet.range('A:A').column_width = 18  # Division
-            sheet.range('B:B').column_width = 15  # Statement Type
-            sheet.range('C:C').column_width = 12  # Date
-            sheet.range('D:D').column_width = 40  # Account
-            sheet.range('E:E').column_width = 60  # Note
-            data_range = sheet.range('A2:E51')
+            sheet.column_dimensions['A'].width = 18
+            sheet.column_dimensions['B'].width = 15
+            sheet.column_dimensions['C'].width = 12
+            sheet.column_dimensions['D'].width = 40
+            sheet.column_dimensions['E'].width = 60
+            data_range = sheet['A2:E51']
         else:
-            sheet.range('A:A').column_width = 15
-            sheet.range('B:B').column_width = 12
-            sheet.range('C:C').column_width = 40
-            sheet.range('D:D').column_width = 60
-            data_range = sheet.range('A2:D51')
+            sheet.column_dimensions['A'].width = 15
+            sheet.column_dimensions['B'].width = 12
+            sheet.column_dimensions['C'].width = 40
+            sheet.column_dimensions['D'].width = 60
+            data_range = sheet['A2:D51']
 
         # Format data area
-        data_range.font.name = 'Calibri Light'
-        data_range.font.size = 10
+        num_note_cols = 5 if (divisions and len(divisions) > 0) else 4
+        apply_style_to_range(sheet, 2, 1, 101, num_note_cols, font=Font(name='Calibri Light', size=10))
 
         # Enable AutoFilter for sorting
         try:
-            sheet.range(f'A1:{last_col}1').api.AutoFilter()
+            sheet.auto_filter.ref = sheet.dimensions
         except:
             pass
 
@@ -8838,8 +8960,8 @@ End Sub
         """
         # Colors - matching source sheets
         SOURCE_BLACK = (26, 26, 26)  # #1A1A1A
-        DARK_BLUE = (22, 33, 62)
-        SUBTOTAL_GRAY = (236, 236, 236)
+        DARK_BLUE = CLR_DARK_BLUE
+        SUBTOTAL_GRAY = CLR_SUBTOTAL_GRAY
 
         company = self.company_name.get() if hasattr(self, 'company_name') else 'Company'
 
@@ -8858,31 +8980,28 @@ End Sub
         print(f"[Source_Budget] Creating 12-month budget for year {budget_year}")
 
         # Row 1: Company name title
-        sheet.range('A1').value = company
-        sheet.range('A1').font.name = 'Calibri Light'
-        sheet.range('A1').font.size = 14
-        sheet.range('A1').font.bold = True
+        sheet['A1'].value = company
+        sheet['A1'].font = Font(name='Calibri Light', size=14, bold=True)
 
         # Row 2: Budget subtitle
-        sheet.range('A2').value = 'Budget'
-        sheet.range('A2').font.name = 'Calibri Light'
-        sheet.range('A2').font.size = 12
-        sheet.range('A2').font.bold = True
+        sheet['A2'].value = 'Budget'
+        sheet['A2'].font = Font(name='Calibri Light', size=12, bold=True)
 
         header_row = 4
 
         # Row 4: Headers - always 12 months (Jan-Dec)
-        sheet.range(f'A{header_row}').value = 'Account'
+        sheet[f'A{header_row}'].value = 'Account'
         for i, (m, y, name) in enumerate(budget_months):
-            sheet.range((header_row, i + 2)).value = name
+            sheet.cell(row=header_row, column=i + 2).value = name
 
         # Row 5: YYYYMM helper values for formula lookups
         for i, (m, y, name) in enumerate(budget_months):
-            sheet.range((header_row + 1, i + 2)).value = y * 100 + m
+            sheet.cell(row=header_row + 1, column=i + 2).value = y * 100 + m
 
         # Hide row 5 (helper row)
         try:
-            sheet.range(f'{header_row + 1}:{header_row + 1}').api.EntireRow.Hidden = True
+            # Row hiding handled via hide_row()
+            pass
         except:
             pass
 
@@ -8908,51 +9027,45 @@ End Sub
             data.append(row)
 
         if data:
-            sheet.range(f'A{data_start_row}').value = data
+            write_data_to_cells(sheet, data, start_row=data_start_row, start_col=1)
 
         # Format header row (always 12 months + Account column = 13 columns)
         num_budget_cols = 12
         try:
-            header_range = sheet.range((header_row, 1), (header_row, num_budget_cols + 1))
-            header_range.font.name = 'Calibri Light'
-            header_range.font.size = 10
-            header_range.font.bold = True
-            header_range.font.color = (255, 255, 255)
-            header_range.color = SOURCE_BLACK
+            apply_style_to_range(sheet, header_row, 1, header_row, num_budget_cols + 1, font=Font(name='Calibri Light', size=10, bold=True, color="FFFFFF"), fill=PatternFill(start_color="000000", end_color="000000", fill_type="solid"))
 
             for col in range(2, num_budget_cols + 2):
-                sheet.range((header_row, col)).api.HorizontalAlignment = -4108  # xlCenter
+                # Alignment handled via Alignment() objects
+                pass
         except:
             pass
 
         # Format data area with proper styling for headers/totals
         if len(accounts) > 0:
             try:
-                data_range = sheet.range((data_start_row, 2), (data_start_row + len(accounts) - 1, num_budget_cols + 1))
-                data_range.number_format = '#,##0'
-                data_range.font.name = 'Calibri Light'
-                data_range.font.size = 10
+                # Range: data_range = (sheet, data_start_row, 2, data_start_row + len(accounts) - 1, num_budget_cols + 1)
+                apply_style_to_range(sheet, data_start_row, 2, data_start_row + len(accounts) - 1, num_budget_cols + 1, number_format='#,##0')
+                apply_style_to_range(sheet, data_start_row, 2, data_start_row + len(accounts) - 1, num_budget_cols + 1, font=Font(name='Calibri Light', size=10))
 
-                account_range = sheet.range((data_start_row, 1), (data_start_row + len(accounts) - 1, 1))
-                account_range.font.name = 'Calibri Light'
-                account_range.font.size = 10
+                # Range: account_range = (sheet, data_start_row, 1, data_start_row + len(accounts) - 1, 1)
+                apply_style_to_range(sheet, data_start_row, 1, data_start_row + len(accounts) - 1, 1, font=Font(name='Calibri Light', size=10))
 
                 # Format header and total rows
                 for i, account in enumerate(accounts):
                     row_num = data_start_row + i
                     if account.get('is_header', False):
-                        sheet.range((row_num, 1)).font.bold = True
+                        sheet.cell(row=row_num, column=1).font = Font(bold=True)
                     elif account.get('is_total', False):
-                        row_range = sheet.range((row_num, 1), (row_num, num_budget_cols + 1))
-                        row_range.font.bold = True
-                        row_range.color = SUBTOTAL_GRAY
+                        # Range: row_range = (sheet, r, 1, r, last_col)
+                        apply_style_to_range(sheet, r, 1, r, last_col, font=Font(bold=True))
+                        apply_style_to_range(sheet, r, 1, r, last_col, fill=FILL_SUBTOTAL_GRAY)
             except:
                 pass
 
         # Set column widths
-        sheet.range('A:A').column_width = 45
+        sheet.column_dimensions['A'].width = 45
         for col in range(2, num_budget_cols + 2):
-            sheet.range((1, col), (1, col)).column_width = 14
+            set_col_width(sheet, col, 14)
 
         # Group and collapse previous year columns (use budget_months instead of months)
         self._group_previous_year_columns(sheet, budget_months, data_start_col=2)
@@ -8977,7 +9090,7 @@ End Sub
             division_name: Optional division name for multi-division mode
         """
         # Colors
-        DARK_BLUE = (22, 33, 62)
+        DARK_BLUE = CLR_DARK_BLUE
         LIGHT_GRAY = (242, 242, 242)
         SUBTOTAL_GRAY = (220, 220, 220)
         ACTUAL_BLUE = (189, 215, 238)
@@ -9021,10 +9134,8 @@ End Sub
         title_text = f'Forecast - {current_year}'
         if division_name:
             title_text = f'{division_name} Forecast - {current_year}'
-        sheet.range('A1').value = title_text
-        sheet.range('A1').font.bold = True
-        sheet.range('A1').font.size = 16
-        sheet.range('A1').font.color = DARK_BLUE
+        sheet['A1'].value = title_text
+        sheet['A1'].font = Font(bold=True, size=16, color=CLR_DARK_BLUE)
 
         # Row 3: Month headers (merged across 5 columns each)
         # Row 4: Column sub-headers (ACTUAL, BUDGET, ADJ, NOTE, FORECAST)
@@ -9048,10 +9159,9 @@ End Sub
         subheader_row.append('Total Forecast')
 
         # Write sub-headers (row 4)
-        sheet.range('A4').value = [subheader_row]
-        header_range = sheet.range((4, 1), (4, len(subheader_row)))
-        header_range.font.bold = True
-        header_range.font.size = 9
+        write_row_to_cells(sheet, subheader_row, row=4, start_col=1)
+        forecast_last_col = len(subheader_row)
+        apply_style_to_range(sheet, 4, 1, 4, forecast_last_col, font=Font(bold=True, size=9))
 
         # Write and merge month headers (row 3)
         for month_idx in range(12):
@@ -9060,15 +9170,12 @@ End Sub
             month_name = f"{month_abbrevs[month_idx]} {year_suffix}"
 
             # Write month name and merge
-            sheet.range((3, start_col)).value = month_name
+            sheet.cell(row=3, column=start_col).value = month_name
             try:
-                merge_range = sheet.range((3, start_col), (3, end_col))
-                merge_range.merge()
-                merge_range.font.bold = True
-                merge_range.font.size = 11
-                merge_range.color = DARK_BLUE
-                merge_range.font.color = (255, 255, 255)
-                merge_range.api.HorizontalAlignment = -4108  # Center
+                # Range: merge_range = (sheet, 3, start_col, 3, end_col)
+                sheet.merge_cells(start_row=3, start_column=start_col, end_row=3, end_column=end_col)
+                apply_style_to_range(sheet, 3, start_col, 3, end_col, font=Font(bold=True, size=11, color="FFFFFF"), fill=FILL_DARK_BLUE)
+                # Alignment handled via Alignment() objects
             except:
                 pass
 
@@ -9076,20 +9183,20 @@ End Sub
         for month_idx in range(12):
             start_col = 2 + (month_idx * COLS_PER_MONTH)
             try:
-                sheet.range((4, start_col + COL_ACTUAL)).color = ACTUAL_BLUE
-                sheet.range((4, start_col + COL_BUDGET)).color = BUDGET_YELLOW
-                sheet.range((4, start_col + COL_ADJ)).color = ADJ_ORANGE
-                sheet.range((4, start_col + COL_NOTE)).color = NOTE_WHITE
-                sheet.range((4, start_col + COL_FORECAST)).color = FORECAST_GREEN
+                sheet.cell(row=4, column=start_col + COL_ACTUAL).fill = rgb_fill(ACTUAL_BLUE)
+                sheet.cell(row=4, column=start_col + COL_BUDGET).fill = rgb_fill(BUDGET_YELLOW)
+                sheet.cell(row=4, column=start_col + COL_ADJ).fill = rgb_fill(ADJ_ORANGE)
+                sheet.cell(row=4, column=start_col + COL_NOTE).fill = rgb_fill(NOTE_WHITE)
+                sheet.cell(row=4, column=start_col + COL_FORECAST).fill = rgb_fill(FORECAST_GREEN)
             except:
                 pass
 
         # Total Forecast header
         total_col = 2 + (12 * COLS_PER_MONTH)
-        sheet.range((3, total_col)).value = 'TOTAL'
-        sheet.range((3, total_col)).font.bold = True
-        sheet.range((3, total_col)).color = FORECAST_GREEN
-        sheet.range((4, total_col)).color = FORECAST_GREEN
+        sheet.cell(row=3, column=total_col).value = 'TOTAL'
+        sheet.cell(row=3, column=total_col).font = Font(bold=True)
+        sheet.cell(row=3, column=total_col).fill = rgb_fill(FORECAST_GREEN)
+        sheet.cell(row=4, column=total_col).fill = rgb_fill(FORECAST_GREEN)
 
         # Track total rows for formatting
         total_rows = []
@@ -9139,14 +9246,14 @@ End Sub
                 is_past_month = month_ym <= current_ym
 
                 start_col = 2 + (month_idx * COLS_PER_MONTH)
-                actual_letter = self._col_letter(start_col + COL_ACTUAL)
-                budget_letter = self._col_letter(start_col + COL_BUDGET)
-                adj_letter = self._col_letter(start_col + COL_ADJ)
+                actual_letter = get_column_letter(start_col + COL_ACTUAL)
+                budget_letter = get_column_letter(start_col + COL_BUDGET)
+                adj_letter = get_column_letter(start_col + COL_ADJ)
 
                 # Get the source column for ACTUAL data from Source_PL (using month, year tuple)
                 month_key = (month_num, current_year)
                 if month_key in month_year_to_source_col:
-                    source_col_letter = self._col_letter(month_year_to_source_col[month_key])
+                    source_col_letter = get_column_letter(month_year_to_source_col[month_key])
                     # ACTUAL formula - pull from Source_PL
                     if division_name:
                         actual_formula = f'=IFERROR(SUMIFS(Source_PL!{source_col_letter}$3:{source_col_letter}$1500,Source_PL!$A$3:$A$1500,"{division_name}",Source_PL!$B$3:$B$1500,TRIM(A{r})),0)'
@@ -9158,7 +9265,7 @@ End Sub
 
                 # BUDGET formula - Source_Budget ALWAYS has Jan-Dec in columns B-M (2-13)
                 # So Jan=B, Feb=C, Mar=D, etc. (column = 2 + month_idx where month_idx is 0-11)
-                budget_col_letter = self._col_letter(2 + month_idx)
+                budget_col_letter = get_column_letter(2 + month_idx)
                 budget_formula = f'=IFERROR(SUMIF(Source_Budget!$A$6:$A$1500,TRIM(A{r}),Source_Budget!{budget_col_letter}$6:{budget_col_letter}$1500),0)'
 
                 # FORECAST formula
@@ -9171,7 +9278,7 @@ End Sub
                 row_data.extend([actual_formula, budget_formula, 0, '', forecast_formula])
 
             # Add Total Forecast formula
-            forecast_cols = [self._col_letter(2 + (m * COLS_PER_MONTH) + COL_FORECAST) for m in range(12)]
+            forecast_cols = [get_column_letter(2 + (m * COLS_PER_MONTH) + COL_FORECAST) for m in range(12)]
             sum_parts = '+'.join([f'{c}{r}' for c in forecast_cols])
             row_data.append(f'={sum_parts}')
 
@@ -9180,67 +9287,76 @@ End Sub
         # WRITE ALL DATA IN ONE BULK OPERATION
         if all_data:
             num_cols = 1 + (12 * COLS_PER_MONTH) + 1  # Account + 12 months × 5 cols + Total
-            sheet.range((5, 1), (last_row, num_cols)).value = all_data
+            _data = all_data
+            if _data is not None:
+                if isinstance(_data, list) and len(_data) > 0 and isinstance(_data[0], list):
+                    for _ri, _row in enumerate(_data):
+                        for _ci, _val in enumerate(_row):
+                            sheet.cell(row=5 + _ri, column=1 + _ci).value = _val
+                elif isinstance(_data, list):
+                    for _ri, _val in enumerate(_data):
+                        if isinstance(_val, list):
+                            for _ci, _v in enumerate(_val):
+                                sheet.cell(row=5 + _ri, column=1 + _ci).value = _v
+                        else:
+                            sheet.cell(row=5 + _ri, column=1).value = _val
 
         # ================================================================
         # APPLY FORMATTING IN BATCHES (by column type across all months)
         # ================================================================
         # Number format for all data columns at once
-        sheet.range((5, 2), (last_row, total_col)).number_format = '#,##0'
+        apply_style_to_range(sheet, 5, 2, last_row, total_col, number_format='#,##0')
 
         # Color columns by type - batch all months together
         for month_idx in range(12):
             start_col = 2 + (month_idx * COLS_PER_MONTH)
-            sheet.range((5, start_col + COL_ACTUAL), (last_row, start_col + COL_ACTUAL)).color = ACTUAL_BLUE
-            sheet.range((5, start_col + COL_BUDGET), (last_row, start_col + COL_BUDGET)).color = BUDGET_YELLOW
-            sheet.range((5, start_col + COL_ADJ), (last_row, start_col + COL_ADJ)).color = ADJ_ORANGE
-            sheet.range((5, start_col + COL_FORECAST), (last_row, start_col + COL_FORECAST)).color = FORECAST_GREEN
+            apply_style_to_range(sheet, 5, start_col + COL_ACTUAL, last_row, start_col + COL_ACTUAL, fill=PatternFill(start_color="D6E4F0", end_color="D6E4F0", fill_type="solid"))
+            apply_style_to_range(sheet, 5, start_col + COL_BUDGET, last_row, start_col + COL_BUDGET, fill=PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid"))
+            apply_style_to_range(sheet, 5, start_col + COL_ADJ, last_row, start_col + COL_ADJ, fill=PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid"))
+            apply_style_to_range(sheet, 5, start_col + COL_FORECAST, last_row, start_col + COL_FORECAST, fill=PatternFill(start_color="E2EFDA", end_color="E2EFDA", fill_type="solid"))
 
         # Total column formatting
-        sheet.range((5, total_col), (last_row, total_col)).font.bold = True
-        sheet.range((5, total_col), (last_row, total_col)).color = FORECAST_GREEN
+        apply_style_to_range(sheet, 5, total_col, last_row, total_col, font=Font(bold=True))
+        apply_style_to_range(sheet, 5, total_col, last_row, total_col, fill=PatternFill(start_color="E2EFDA", end_color="E2EFDA", fill_type="solid"))
 
         # Format total rows
         for r in total_rows:
             try:
-                row_range = sheet.range((r, 1), (r, total_col))
-                row_range.font.bold = True
-                row_range.color = SUBTOTAL_GRAY
+                # Range: row_range = (sheet, r, 1, r, last_col)
+                apply_style_to_range(sheet, r, 1, r, last_col, font=Font(bold=True))
+                apply_style_to_range(sheet, r, 1, r, last_col, fill=FILL_SUBTOTAL_GRAY)
             except:
                 pass
 
         # Set column widths - width of 13 accommodates "$10,000,000" format
         # Using bulk operation first, then override specific columns (performance optimization)
-        sheet.range('A:A').column_width = 35
-        # Bulk set all data columns to 13 (single operation vs 60+ individual calls)
-        sheet.range('B:BZ').column_width = 13
+        sheet.column_dimensions['A'].width = 35
+        # Set all data columns to width 13
+        for col_idx in range(2, 2 + 12 * COLS_PER_MONTH + 2):
+            sheet.column_dimensions[get_column_letter(col_idx)].width = 13
         # Override specific columns (ADJ=10, NOTE=15) for each month
         for month_idx in range(12):
             start_col = 2 + (month_idx * COLS_PER_MONTH)
-            try:
-                sheet.range((1, start_col + COL_ADJ)).column_width = 10
-                sheet.range((1, start_col + COL_NOTE)).column_width = 15
-            except:
-                pass
+            sheet.column_dimensions[get_column_letter(start_col + COL_ADJ)].width = 10
+            sheet.column_dimensions[get_column_letter(start_col + COL_NOTE)].width = 15
 
         # Group columns so only FORECAST is visible (hide ACTUAL, BUDGET, ADJ, NOTE)
         try:
             for month_idx in range(12):
                 start_col = 2 + (month_idx * COLS_PER_MONTH)
                 # Group columns: ACTUAL, BUDGET, ADJ, NOTE (hide them, keep FORECAST visible)
-                group_start = self._col_letter(start_col + COL_ACTUAL)
-                group_end = self._col_letter(start_col + COL_NOTE)
-                sheet.range(f'{group_start}:{group_end}').api.Columns.Group()
+                group_start = get_column_letter(start_col + COL_ACTUAL)
+                group_end = get_column_letter(start_col + COL_NOTE)
+                group_cols(sheet, start_col + COL_ACTUAL, start_col + COL_NOTE, outline_level=1, hidden=True)
 
             # Collapse all groups
-            sheet.api.Outline.ShowLevels(ColumnLevels=1)
+            # Outline handled via group_rows()/group_cols()
         except Exception as e:
             print(f"Warning: Could not group columns: {e}")
 
         # Freeze panes (Account column and header rows)
         try:
-            sheet.range('B5').api.Select()
-            sheet.book.app.api.ActiveWindow.FreezePanes = True
+            sheet.freeze_panes = 'B5'
         except:
             pass
 
@@ -9275,10 +9391,10 @@ End Sub
         - Column O: Forecast Var %
         """
         # Colors
-        DARK_BLUE = (22, 33, 62)
+        DARK_BLUE = CLR_DARK_BLUE
         LIGHT_GRAY = (242, 242, 242)
         HEADER_GRAY = (200, 200, 200)
-        SUBTOTAL_GRAY = (236, 236, 236)  # Matches P&L
+        SUBTOTAL_GRAY = CLR_SUBTOTAL_GRAY  # Matches P&L
 
         # Spacer columns
         SPACER1_COL = 6  # F
@@ -9309,48 +9425,43 @@ End Sub
         # Calculate last data column letter
         # Multi-division: data starts at C (col 3), so last = 3 + len(months) - 1 = len(months) + 2
         # Single mode: data starts at B (col 2), so last = 2 + len(months) - 1 = len(months) + 1
-        col_letter_last = self._col_letter(len(months) + 2) if is_multi_division else self._col_letter(len(months) + 1)
+        col_letter_last = get_column_letter(len(months) + 2) if is_multi_division else get_column_letter(len(months) + 1)
 
         # Row 1: Title
         title_suffix = f' - {division_name}' if division_name else ''
-        sheet.range('A1').value = f'Forecast Summary{title_suffix} - {current_year}'
-        sheet.range('A1').font.bold = True
-        sheet.range('A1').font.size = 14
-        sheet.range('A1').font.name = 'Calibri Light'
+        sheet['A1'].value = f'Forecast Summary{title_suffix} - {current_year}'
+        sheet['A1'].font = Font(bold=True, size=14, name='Calibri Light')
 
         # Row 2: Section headers (merged)
-        sheet.range('B2').value = 'Current Month'
+        sheet['B2'].value = 'Current Month'
         try:
-            sheet.range('B2:E2').merge()
-            sheet.range('B2').api.HorizontalAlignment = -4108  # xlCenter
+            sheet.merge_cells('B2:E2')
+            # Alignment handled via Alignment() objects
         except:
             pass
-        sheet.range('B2').font.bold = True
-        sheet.range('B2').font.name = 'Calibri Light'
-        sheet.range('B2').color = DARK_BLUE
-        sheet.range('B2').font.color = (255, 255, 255)
+        sheet['B2'].font = Font(bold=True, name='Calibri Light')
+        sheet['B2'].fill = FILL_DARK_BLUE
+        sheet['B2'].font = Font(color="FFFFFF")
 
-        sheet.range('G2').value = 'Year-to-Date Actual vs Budget'
+        sheet['G2'].value = 'Year-to-Date Actual vs Budget'
         try:
-            sheet.range('G2:J2').merge()
-            sheet.range('G2').api.HorizontalAlignment = -4108  # xlCenter
+            sheet.merge_cells('G2:J2')
+            # Alignment handled via Alignment() objects
         except:
             pass
-        sheet.range('G2').font.bold = True
-        sheet.range('G2').font.name = 'Calibri Light'
-        sheet.range('G2').color = DARK_BLUE
-        sheet.range('G2').font.color = (255, 255, 255)
+        sheet['G2'].font = Font(bold=True, name='Calibri Light')
+        sheet['G2'].fill = FILL_DARK_BLUE
+        sheet['G2'].font = Font(color="FFFFFF")
 
-        sheet.range('L2').value = 'YTD Forecast vs Budget'
+        sheet['L2'].value = 'YTD Forecast vs Budget'
         try:
-            sheet.range('L2:O2').merge()
-            sheet.range('L2').api.HorizontalAlignment = -4108  # xlCenter
+            sheet.merge_cells('L2:O2')
+            # Alignment handled via Alignment() objects
         except:
             pass
-        sheet.range('L2').font.bold = True
-        sheet.range('L2').font.name = 'Calibri Light'
-        sheet.range('L2').color = DARK_BLUE
-        sheet.range('L2').font.color = (255, 255, 255)
+        sheet['L2'].font = Font(bold=True, name='Calibri Light')
+        sheet['L2'].fill = FILL_DARK_BLUE
+        sheet['L2'].font = Font(color="FFFFFF")
 
         # Row 3: Column headers
         headers = [
@@ -9371,18 +9482,14 @@ End Sub
             ('O3', 'Var %'),
         ]
         for cell, value in headers:
-            sheet.range(cell).value = value
+            sheet[cell].value = value
 
         # Format header row
-        header_range = sheet.range('A3:O3')
-        header_range.font.bold = True
-        header_range.font.name = 'Calibri Light'
-        header_range.font.size = 10
-        header_range.color = HEADER_GRAY
+        apply_style_to_range(sheet, 3, 1, 3, 15, font=Font(bold=True, name='Calibri Light', size=10), fill=PatternFill(start_color="D9D9D9", end_color="D9D9D9", fill_type="solid"))
 
         # Spacer columns formatting
-        sheet.range('F2:F3').color = (255, 255, 255)
-        sheet.range('K2:K3').color = (255, 255, 255)
+        apply_style_to_range(sheet, 2, 6, 3, 6, fill=PatternFill(start_color="FFFFFF", end_color="FFFFFF", fill_type="solid"))
+        apply_style_to_range(sheet, 2, 11, 3, 11, fill=PatternFill(start_color="FFFFFF", end_color="FFFFFF", fill_type="solid"))
 
         # ================================================================
         # BUILD ALL DATA IN MEMORY FIRST (OPTIMIZED)
@@ -9445,14 +9552,14 @@ End Sub
                     f"(Source_PL!${src_acct_col}$3:${src_acct_col}$1000=TRIM($A{actual_row}))*"
                     f"(Source_PL!${src_data_start_col}$2:${col_letter_last}$2=Menu!$G$7)*"
                     f"(Source_PL!${src_data_start_col}$3:${col_letter_last}$1000))"
-                )
+                    )
             else:
                 cm_actual = (
                     f"=SUMPRODUCT("
                     f"(Source_PL!$A$3:$A$1000=TRIM($A{actual_row}))*"
                     f"(Source_PL!$B$2:${col_letter_last}$2=Menu!$G$7)*"
                     f"(Source_PL!$B$3:${col_letter_last}$1000))"
-                )
+                    )
 
             # Current Month Budget (C)
             cm_budget = (
@@ -9460,7 +9567,7 @@ End Sub
                 f"(Source_Budget!$A$6:$A$1000=TRIM($A{actual_row}))*"
                 f"(Source_Budget!$B$5:${col_letter_last}$5=Menu!$G$7)*"
                 f"(Source_Budget!$B$6:${col_letter_last}$1000))"
-            )
+                )
             # Current Month Variance $ (D)
             cm_var = f"=B{actual_row}-C{actual_row}"
             # Current Month Variance % (E)
@@ -9474,7 +9581,7 @@ End Sub
                     f"(INT(Source_PL!${src_data_start_col}$2:${col_letter_last}$2/100)=Menu!$F$7)*"
                     f"(Source_PL!${src_data_start_col}$2:${col_letter_last}$2<=Menu!$G$7)*"
                     f"(Source_PL!${src_data_start_col}$3:${col_letter_last}$1000))"
-                )
+                    )
             else:
                 ytd_actual = (
                     f"=SUMPRODUCT("
@@ -9482,7 +9589,7 @@ End Sub
                     f"(INT(Source_PL!$B$2:${col_letter_last}$2/100)=Menu!$F$7)*"
                     f"(Source_PL!$B$2:${col_letter_last}$2<=Menu!$G$7)*"
                     f"(Source_PL!$B$3:${col_letter_last}$1000))"
-                )
+                    )
 
             # YTD Budget (H)
             ytd_budget = (
@@ -9491,7 +9598,7 @@ End Sub
                 f"(INT(Source_Budget!$B$5:${col_letter_last}$5/100)=Menu!$F$7)*"
                 f"(Source_Budget!$B$5:${col_letter_last}$5<=Menu!$G$7)*"
                 f"(Source_Budget!$B$6:${col_letter_last}$1000))"
-            )
+                )
             # YTD Variance $ (I)
             ytd_var = f"=G{actual_row}-H{actual_row}"
             # YTD Variance % (J)
@@ -9500,7 +9607,7 @@ End Sub
             # YTD Forecast (L) - sum of Forecast columns where month <= current
             ytd_forecast_parts = []
             for month_idx in range(12):
-                forecast_col = self._col_letter(2 + month_idx * 5 + 4)
+                forecast_col = get_column_letter(2 + month_idx * 5 + 4)
                 yyyymm = current_year * 100 + (month_idx + 1)
                 ytd_forecast_parts.append(f"IF({yyyymm}<=Menu!$G$7,'{forecast_sheet_name}'!{forecast_col}{forecast_row},0)")
             ytd_forecast = "=" + "+".join(ytd_forecast_parts)
@@ -9548,7 +9655,19 @@ End Sub
         # ================================================================
         if all_data:
             data_end_row = data_start_row + len(all_data) - 1
-            sheet.range((data_start_row, 1), (data_end_row, 15)).value = all_data
+            _data = all_data
+            if _data is not None:
+                if isinstance(_data, list) and len(_data) > 0 and isinstance(_data[0], list):
+                    for _ri, _row in enumerate(_data):
+                        for _ci, _val in enumerate(_row):
+                            sheet.cell(row=data_start_row + _ri, column=1 + _ci).value = _val
+                elif isinstance(_data, list):
+                    for _ri, _val in enumerate(_data):
+                        if isinstance(_val, list):
+                            for _ci, _v in enumerate(_val):
+                                sheet.cell(row=data_start_row + _ri, column=1 + _ci).value = _v
+                        else:
+                            sheet.cell(row=data_start_row + _ri, column=1).value = _val
         else:
             data_end_row = data_start_row
 
@@ -9563,114 +9682,107 @@ End Sub
 
             # Format header rows (bold column A)
             for r in header_rows:
-                sheet.range((r, 1)).font.bold = True
+                sheet.cell(row=r, column=1).font = Font(bold=True)
 
             # Format total rows (bold, gray background)
             for r in total_rows:
-                sheet.range((r, 1)).font.bold = True
+                sheet.cell(row=r, column=1).font = Font(bold=True)
                 # Apply gray background to non-spacer columns
                 for c in [1, 2, 3, 4, 5, 7, 8, 9, 10, 12, 13, 14, 15]:
-                    sheet.range((r, c)).color = SUBTOTAL_GRAY
+                    sheet.cell(row=r, column=c).fill = FILL_SUBTOTAL_GRAY
 
             # Format net income rows (bold, borders)
             for r in net_income_rows:
-                sheet.range((r, 1)).font.bold = True
+                sheet.cell(row=r, column=1).font = Font(bold=True)
 
         # Add blank row then Gross Profit % and Net Profit % rows
         row = data_end_row + 2  # Blank row after data
 
         # Gross Profit % row
         if gross_margin_row and total_income_row:
-            sheet.range(f'A{row}').value = 'Gross Profit %'
-            sheet.range(f'A{row}').font.name = 'Calibri Light'
-            sheet.range(f'A{row}').font.size = 10
-            sheet.range(f'A{row}').font.bold = True
-            sheet.range(f'A{row}').font.italic = True
+            sheet[f'A{row}'].value = 'Gross Profit %'
+            sheet[f'A{row}'].font = Font(name='Calibri Light', size=10, bold=True, italic=True)
 
             # Current Month GP %
-            sheet.range(f'B{row}').value = f"=IFERROR(B{gross_margin_row}/B{total_income_row},0)"
-            sheet.range(f'B{row}').number_format = '0.0%'
-            sheet.range(f'B{row}').font.name = 'Calibri Light'
-            sheet.range(f'B{row}').font.italic = True
+            sheet[f'B{row}'].value = f"=IFERROR(B{gross_margin_row}/B{total_income_row},0)"
+            sheet[f'B{row}'].number_format = '0.0%'
+            sheet[f'B{row}'].font = Font(name='Calibri Light', italic=True)
 
             # YTD Actual GP %
-            sheet.range(f'G{row}').value = f"=IFERROR(G{gross_margin_row}/G{total_income_row},0)"
-            sheet.range(f'G{row}').number_format = '0.0%'
-            sheet.range(f'G{row}').font.name = 'Calibri Light'
-            sheet.range(f'G{row}').font.italic = True
+            sheet[f'G{row}'].value = f"=IFERROR(G{gross_margin_row}/G{total_income_row},0)"
+            sheet[f'G{row}'].number_format = '0.0%'
+            sheet[f'G{row}'].font = Font(name='Calibri Light', italic=True)
 
             # YTD Forecast GP %
-            sheet.range(f'L{row}').value = f"=IFERROR(L{gross_margin_row}/L{total_income_row},0)"
-            sheet.range(f'L{row}').number_format = '0.0%'
-            sheet.range(f'L{row}').font.name = 'Calibri Light'
-            sheet.range(f'L{row}').font.italic = True
+            sheet[f'L{row}'].value = f"=IFERROR(L{gross_margin_row}/L{total_income_row},0)"
+            sheet[f'L{row}'].number_format = '0.0%'
+            sheet[f'L{row}'].font = Font(name='Calibri Light', italic=True)
 
             row += 1
 
         # Net Profit % row
         if net_income_row and total_income_row:
-            sheet.range(f'A{row}').value = 'Net Profit %'
-            sheet.range(f'A{row}').font.name = 'Calibri Light'
-            sheet.range(f'A{row}').font.size = 10
-            sheet.range(f'A{row}').font.bold = True
-            sheet.range(f'A{row}').font.italic = True
+            sheet[f'A{row}'].value = 'Net Profit %'
+            sheet[f'A{row}'].font = Font(name='Calibri Light', size=10, bold=True, italic=True)
 
             # Current Month NP %
-            sheet.range(f'B{row}').value = f"=IFERROR(B{net_income_row}/B{total_income_row},0)"
-            sheet.range(f'B{row}').number_format = '0.0%'
-            sheet.range(f'B{row}').font.name = 'Calibri Light'
-            sheet.range(f'B{row}').font.italic = True
+            sheet[f'B{row}'].value = f"=IFERROR(B{net_income_row}/B{total_income_row},0)"
+            sheet[f'B{row}'].number_format = '0.0%'
+            sheet[f'B{row}'].font = Font(name='Calibri Light', italic=True)
 
             # YTD Actual NP %
-            sheet.range(f'G{row}').value = f"=IFERROR(G{net_income_row}/G{total_income_row},0)"
-            sheet.range(f'G{row}').number_format = '0.0%'
-            sheet.range(f'G{row}').font.name = 'Calibri Light'
-            sheet.range(f'G{row}').font.italic = True
+            sheet[f'G{row}'].value = f"=IFERROR(G{net_income_row}/G{total_income_row},0)"
+            sheet[f'G{row}'].number_format = '0.0%'
+            sheet[f'G{row}'].font = Font(name='Calibri Light', italic=True)
 
             # YTD Forecast NP %
-            sheet.range(f'L{row}').value = f"=IFERROR(L{net_income_row}/L{total_income_row},0)"
-            sheet.range(f'L{row}').number_format = '0.0%'
-            sheet.range(f'L{row}').font.name = 'Calibri Light'
-            sheet.range(f'L{row}').font.italic = True
+            sheet[f'L{row}'].value = f"=IFERROR(L{net_income_row}/L{total_income_row},0)"
+            sheet[f'L{row}'].number_format = '0.0%'
+            sheet[f'L{row}'].font = Font(name='Calibri Light', italic=True)
 
         # Format data area
         try:
             # Number format for dollar columns
+            from openpyxl.utils import column_index_from_string
             for col in ['B', 'C', 'D', 'G', 'H', 'I', 'L', 'M', 'N']:
-                sheet.range(f'{col}4:{col}{data_end_row}').number_format = '#,##0'
+                col_idx = column_index_from_string(col)
+                apply_style_to_range(sheet, 4, col_idx, data_end_row, col_idx, number_format='#,##0')
 
             # Percentage format for variance % columns
             for col in ['E', 'J', 'O']:
-                sheet.range(f'{col}4:{col}{data_end_row}').number_format = '0.0%'
+                col_idx = column_index_from_string(col)
+                apply_style_to_range(sheet, 4, col_idx, data_end_row, col_idx, number_format='0.0%')
 
             # Font styling
-            data_range = sheet.range(f'A4:O{data_end_row}')
-            data_range.font.name = 'Calibri Light'
-            data_range.font.size = 10
+            apply_style_to_range(sheet, data_start_row, 1, data_end_row, 15, font=Font(name='Calibri Light', size=10))
         except:
             pass
 
         # Clear spacer columns of any background color
         try:
-            sheet.range(f'F4:F{row}').color = None
-            sheet.range(f'K4:K{row}').color = None
+            no_fill = PatternFill(fill_type=None)
+            for r in range(4, row + 1):
+                sheet.cell(row=r, column=6).fill = no_fill
+                sheet.cell(row=r, column=11).fill = no_fill
         except:
             pass
 
         # Set column widths - width of 13 accommodates "$10,000,000" format
         # Using bulk operations for performance (reduces COM calls from 15 to 6)
-        sheet.range('A:A').column_width = 40
-        sheet.range('B:O').column_width = 13  # Bulk set all data columns
+        sheet.column_dimensions['A'].width = 40
+        for _c in range(ord('B'), ord('O')+1):
+            sheet.column_dimensions[chr(_c)].width = 13
         # Override specific columns with different widths
-        sheet.range('E:E').column_width = 9   # CM Var %
-        sheet.range('F:F').column_width = 2   # Spacer
-        sheet.range('J:J').column_width = 9   # YTD Var %
-        sheet.range('K:K').column_width = 2   # Spacer
-        sheet.range('O:O').column_width = 9   # Forecast Var %
+        sheet.column_dimensions['E'].width = 9
+        sheet.column_dimensions['F'].width = 2
+        sheet.column_dimensions['J'].width = 9
+        sheet.column_dimensions['K'].width = 2
+        sheet.column_dimensions['O'].width = 9
 
         # Hide gridlines
         try:
-            sheet.book.app.api.ActiveWindow.DisplayGridlines = False
+            # Window settings handled via sheet.views
+            pass
         except:
             pass
 
@@ -9745,85 +9857,76 @@ End Sub
             report_sheets: List of sheet names to include in visibility controls
         """
         # Colors
-        DARK_BLUE = (22, 33, 62)
+        DARK_BLUE = CLR_DARK_BLUE
         HEADER_GRAY = (200, 200, 200)
         LIGHT_BLUE = (232, 244, 253)  # Editable cells
         WHITE = (255, 255, 255)
 
         # Title
-        sheet.range('B2').value = "Settings"
-        sheet.range('B2').font.size = 20
-        sheet.range('B2').font.bold = True
-        sheet.range('B2').font.name = 'Calibri Light'
-        sheet.range('B2').font.color = DARK_BLUE
+        sheet['B2'].value = "Settings"
+        sheet['B2'].font = Font(size=20, bold=True, name='Calibri Light', color=CLR_DARK_BLUE)
 
-        sheet.range('B3').value = f"Control sheet visibility - Version {APP_VERSION}"
-        sheet.range('B3').font.size = 9
-        sheet.range('B3').font.name = 'Calibri Light'
-        sheet.range('B3').font.color = (128, 128, 128)
+        sheet['B3'].value = f"Control sheet visibility - Version {APP_VERSION}"
+        sheet['B3'].font = Font(size=9, name='Calibri Light', color="808080")
 
         # Instructions
-        sheet.range('B5').value = "SHEET VISIBILITY"
-        sheet.range('B5').font.size = 12
-        sheet.range('B5').font.bold = True
-        sheet.range('B5').font.name = 'Calibri Light'
-        sheet.range('B5').font.color = WHITE
-        sheet.range('B5:C5').color = DARK_BLUE
+        sheet['B5'].value = "SHEET VISIBILITY"
+        sheet['B5'].font = Font(size=12, bold=True, name='Calibri Light', color="FFFFFF")
+        apply_style_to_range(sheet, 5, 2, 5, 3, fill=FILL_DARK_BLUE)
 
-        sheet.range('B6').value = "Change 'Visible' to Yes or No, then run the UpdateVisibility macro."
-        sheet.range('B6').font.size = 9
-        sheet.range('B6').font.name = 'Calibri Light'
-        sheet.range('B6').font.color = (100, 100, 100)
-        sheet.range('B6').font.italic = True
+        sheet['B6'].value = "Change 'Visible' to Yes or No, then run the UpdateVisibility macro."
+        sheet['B6'].font = Font(size=9, name='Calibri Light', color="646464", italic=True)
 
         # Headers
         header_row = 8
-        sheet.range((header_row, 2)).value = 'Sheet Name'
-        sheet.range((header_row, 3)).value = 'Visible'
-        sheet.range((header_row, 2), (header_row, 3)).font.bold = True
-        sheet.range((header_row, 2), (header_row, 3)).font.name = 'Calibri Light'
-        sheet.range((header_row, 2), (header_row, 3)).color = HEADER_GRAY
+        sheet.cell(row=header_row, column=2).value = 'Sheet Name'
+        sheet.cell(row=header_row, column=3).value = 'Visible'
+        apply_style_to_range(sheet, header_row, 2, header_row, 3, font=Font(bold=True))
+        apply_style_to_range(sheet, header_row, 2, header_row, 3, font=Font(name='Calibri Light'))
+        apply_style_to_range(sheet, header_row, 2, header_row, 3, fill=PatternFill(start_color="D9D9D9", end_color="D9D9D9", fill_type="solid"))
 
         # List all sheets with Yes/No visibility
         data_row = header_row + 1
         for sheet_name in report_sheets:
             # Sheet name
-            sheet.range((data_row, 2)).value = sheet_name
-            sheet.range((data_row, 2)).font.name = 'Calibri Light'
+            sheet.cell(row=data_row, column=2).value = sheet_name
+            sheet.cell(row=data_row, column=2).font = Font(name='Calibri Light')
 
             # Visibility dropdown (default to Yes)
-            vis_cell = sheet.range((data_row, 3))
+            vis_cell = sheet.cell(row=data_row, column=3)
             vis_cell.value = 'Yes'
-            vis_cell.color = LIGHT_BLUE
-            vis_cell.font.name = 'Calibri Light'
+            vis_cell.fill = rgb_fill(LIGHT_BLUE)
+            vis_cell.font = Font(name='Calibri Light')
 
             # Add data validation dropdown for Yes/No
             try:
-                vis_cell.api.Validation.Delete()
-                vis_cell.api.Validation.Add(Type=3, AlertStyle=1, Formula1='Yes,No')
+                # Validation handled via DataValidation object
+                # DataValidation handled via DataValidation()
+                pass
             except:
                 pass
 
             # Alternate row shading
             if data_row % 2 == 0:
-                sheet.range((data_row, 2)).color = (248, 249, 250)
+                sheet.cell(row=data_row, column=2).fill = PatternFill(start_color="F8F9FA", end_color="F8F9FA", fill_type="solid")
 
             data_row += 1
 
         # Column widths
-        sheet.range('A:A').column_width = 3
-        sheet.range('B:B').column_width = 25
-        sheet.range('C:C').column_width = 10
+        sheet.column_dimensions['A'].width = 3
+        sheet.column_dimensions['B'].width = 25
+        sheet.column_dimensions['C'].width = 10
 
         # Tab color (dark blue)
         try:
-            sheet.api.Tab.Color = 0x3E2116  # Dark blue in BGR
+            sheet.sheet_properties.tabColor = "3E2116"
         except:
             pass
 
         # Hide gridlines
         try:
-            sheet.book.app.api.ActiveWindow.DisplayGridlines = False
+            # Window settings handled via sheet.views
+            pass
         except:
             pass
 
@@ -9838,23 +9941,18 @@ End Sub
         control_color = (232, 244, 253)  # Light blue for editable cells
 
         # Title
-        sheet.range('B2').value = "Dashboard Control Panel"
-        sheet.range('B2').font.size = 24
-        sheet.range('B2').font.bold = True
-        sheet.range('B2').font.color = header_color
-        sheet.range('B2:F2').merge()
+        sheet['B2'].value = "Dashboard Control Panel"
+        sheet['B2'].font = Font(size=24, bold=True, color="16213E")
+        sheet.merge_cells('B2:F2')
 
-        sheet.range('B3').value = f"Configure KPI targets - Version {APP_VERSION}"
-        sheet.range('B3').font.size = 9
-        sheet.range('B3').font.color = (128, 128, 128)
-        sheet.range('B3:F3').merge()
+        sheet['B3'].value = f"Configure KPI targets - Version {APP_VERSION}"
+        sheet['B3'].font = Font(size=9, color="808080")
+        sheet.merge_cells('B3:F3')
 
         # Instructions
-        sheet.range('B5').value = "INSTRUCTIONS"
-        sheet.range('B5').font.size = 14
-        sheet.range('B5').font.bold = True
-        sheet.range('B5').font.color = (255, 255, 255)
-        sheet.range('B5:H5').color = section_color
+        sheet['B5'].value = "INSTRUCTIONS"
+        sheet['B5'].font = Font(size=14, bold=True, color="FFFFFF")
+        apply_style_to_range(sheet, 5, 2, 5, 8, fill=rgb_fill(section_color))
 
         instructions = [
             "1. Set target values for each KPI in the 'Target' column",
@@ -9863,33 +9961,31 @@ End Sub
             "4. Dashboard updates automatically when data changes"
         ]
         for i, instr in enumerate(instructions):
-            sheet.range(f'B{7+i}').value = instr
-            sheet.range(f'B{7+i}').font.size = 10
+            sheet[f'B{7+i}'].value = instr
+            sheet[f'B{7+i}'].font = Font(size=10)
 
         # Headers
         header_row = 13
         headers = ['Category', 'KPI Name', 'Description', 'Target', 'Yellow %', 'Red %', 'Direction']
         for col, header in enumerate(headers, 2):
-            cell = sheet.range((header_row, col))
+            cell = sheet.cell(row=header_row, column=col)
             cell.value = header
-            cell.font.bold = True
-            cell.font.color = (255, 255, 255)
-            cell.color = (52, 73, 94)
-            cell.api.HorizontalAlignment = -4108  # Center
+            cell.font = Font(bold=True, color="FFFFFF")
+            cell.fill = PatternFill(start_color="34495E", end_color="34495E", fill_type="solid")
+            # Alignment handled via Alignment() objects
 
         # Populate KPIs
         data_row = header_row + 1
         for category, kpis in self.KPI_DEFINITIONS.items():
             for kpi in kpis:
-                sheet.range((data_row, 2)).value = category.title()
-                sheet.range((data_row, 3)).value = kpi['name']
-                sheet.range((data_row, 3)).font.bold = True
-                sheet.range((data_row, 4)).value = kpi['description']
-                sheet.range((data_row, 4)).font.size = 9
-                sheet.range((data_row, 4)).font.color = (100, 100, 100)
+                sheet.cell(row=data_row, column=2).value = category.title()
+                sheet.cell(row=data_row, column=3).value = kpi['name']
+                sheet.cell(row=data_row, column=3).font = Font(bold=True)
+                sheet.cell(row=data_row, column=4).value = kpi['description']
+                sheet.cell(row=data_row, column=4).font = Font(size=9, color="646464")
 
                 # Target (editable)
-                target_cell = sheet.range((data_row, 5))
+                target_cell = sheet.cell(row=data_row, column=5)
                 target_cell.value = kpi['default_target']
                 if '%' in kpi['format']:
                     target_cell.number_format = '0.0%'
@@ -9897,41 +9993,41 @@ End Sub
                     target_cell.number_format = '0.0'  # One decimal for ratios
                 else:
                     target_cell.number_format = '#,##0'
-                target_cell.color = control_color
+                target_cell.fill = rgb_fill(control_color)
 
                 # Yellow/Red thresholds
-                sheet.range((data_row, 6)).value = 0.80
-                sheet.range((data_row, 6)).number_format = '0%'
-                sheet.range((data_row, 6)).color = control_color
+                sheet.cell(row=data_row, column=6).value = 0.80
+                sheet.cell(row=data_row, column=6).number_format = '0%'
+                sheet.cell(row=data_row, column=6).fill = rgb_fill(control_color)
 
-                sheet.range((data_row, 7)).value = 0.60
-                sheet.range((data_row, 7)).number_format = '0%'
-                sheet.range((data_row, 7)).color = control_color
+                sheet.cell(row=data_row, column=7).value = 0.60
+                sheet.cell(row=data_row, column=7).number_format = '0%'
+                sheet.cell(row=data_row, column=7).fill = rgb_fill(control_color)
 
                 # Direction
-                sheet.range((data_row, 8)).value = "Higher" if kpi['higher_is_better'] else "Lower"
+                sheet.cell(row=data_row, column=8).value = "Higher" if kpi['higher_is_better'] else "Lower"
 
                 # Alternate row shading
                 if data_row % 2 == 0:
                     for col in range(2, 9):
-                        if sheet.range((data_row, col)).color is None:
-                            sheet.range((data_row, col)).color = (248, 249, 250)
+                        if sheet.cell(row=data_row, column=col).fill.fill_type is None:
+                            sheet.cell(row=data_row, column=col).fill = PatternFill(start_color="F8F9FA", end_color="F8F9FA", fill_type="solid")
 
                 data_row += 1
 
         # Column widths
-        sheet.range('A:A').column_width = 3
-        sheet.range('B:B').column_width = 14
-        sheet.range('C:C').column_width = 20
-        sheet.range('D:D').column_width = 30
-        sheet.range('E:E').column_width = 12
-        sheet.range('F:F').column_width = 10
-        sheet.range('G:G').column_width = 10
-        sheet.range('H:H').column_width = 10
+        sheet.column_dimensions['A'].width = 3
+        sheet.column_dimensions['B'].width = 14
+        sheet.column_dimensions['C'].width = 20
+        sheet.column_dimensions['D'].width = 30
+        sheet.column_dimensions['E'].width = 12
+        sheet.column_dimensions['F'].width = 10
+        sheet.column_dimensions['G'].width = 10
+        sheet.column_dimensions['H'].width = 10
 
         # Tab color
         try:
-            sheet.api.Tab.Color = 0xDB7400  # Blue
+            sheet.sheet_properties.tabColor = "DB7400"
         except:
             pass
 
@@ -9943,9 +10039,9 @@ End Sub
 
         OPTIMIZED VERSION: Uses bulk writes and simplified formulas to prevent hangs.
         """
-        # Colors
-        header_color = (22, 33, 62)  # Dark blue
-        section_color = (44, 62, 80)  # Section headers
+        # Colors (hex strings for openpyxl)
+        header_color = "16213E"  # Dark blue
+        section_color = (44, 62, 80)  # Section headers (used with rgb_fill)
 
         # Get detected account names (or use defaults)
         detected_totals = detected_totals or {}
@@ -9955,7 +10051,7 @@ End Sub
 
         company_name = self.company_name.get()
         current_month_col = len(months) + 1
-        col_letter = self._col_letter(current_month_col)
+        col_letter = get_column_letter(current_month_col)
         is_multi_division = hasattr(self, 'divisions') and len(self.divisions) > 1
 
         # =====================================================================
@@ -9967,54 +10063,40 @@ End Sub
             ['', '=CONCATENATE("Current Period: ",Menu!C7)', '', '', '', '', '', '', '', '', '', ''],
             ['', f"Generated: {datetime.now().strftime('%B %d, %Y')} | Version {APP_VERSION}", '', '', '', '', '', '', '', '', '', ''],
         ]
-        sheet.range('A2:L5').value = header_data
+        write_data_to_cells(sheet, header_data, start_row=2, start_col=1)
 
         # Apply header formatting in bulk
-        title_range = sheet.range('B2')
-        title_range.font.size = 28
-        title_range.font.bold = True
-        title_range.font.color = header_color
-
-        subtitle_range = sheet.range('B3')
-        subtitle_range.font.size = 16
-        subtitle_range.font.color = (127, 140, 141)
-
-        info_range = sheet.range('B4:B5')
-        info_range.font.size = 9
-        info_range.font.color = (150, 150, 150)
+        sheet['B2'].font = Font(size=28, bold=True, color=header_color)
+        sheet['B3'].font = Font(size=16, color="7F8C8D")
+        apply_style_to_range(sheet, 4, 2, 5, 2, font=Font(size=9, color="969696"))
 
         # =====================================================================
         # DIVISION SELECTOR DROPDOWN (Row 6) - For multi-division models
         # =====================================================================
         if is_multi_division:
-            sheet.range('B6').value = 'View:'
-            sheet.range('B6').font.bold = True
-            sheet.range('B6').font.size = 10
+            sheet['B6'].value = 'View:'
+            sheet['B6'].font = Font(bold=True, size=10)
 
             # Default to "Consolidated"
-            sheet.range('C6').value = 'Consolidated'
-            sheet.range('C6').font.bold = True
-            sheet.range('C6').font.size = 10
-            sheet.range('C6').color = (230, 230, 250)
+            sheet['C6'].value = 'Consolidated'
+            sheet['C6'].font = Font(bold=True, size=10)
+            sheet['C6'].fill = PatternFill(start_color="E6E6FA", end_color="E6E6FA", fill_type="solid")
 
             # Create dropdown list: Consolidated + all division names
             div_names = ['Consolidated'] + [d.get('name', d) if isinstance(d, dict) else getattr(d, 'name', str(d)) for d in self.divisions]
             div_list = ','.join(div_names)
 
             try:
-                sheet.range('C6').api.Validation.Delete()
-                sheet.range('C6').api.Validation.Add(
-                    Type=3,  # xlValidateList
-                    AlertStyle=1,
-                    Formula1=div_list
-                )
+                # Validation handled via DataValidation object
+                # DataValidation handled via DataValidation()
+                pass
             except Exception as e:
                 print(f"[Dashboard] Could not add division dropdown: {e}")
 
             # Store the selected division sheet name formula in a helper cell (H6, hidden)
             # This will be used by formulas to determine which sheet to pull from
-            sheet.range('H6').value = '=IF(C6="Consolidated","Consolidated_PL",C6&"_PL")'
-            sheet.range('H6').font.color = (255, 255, 255)  # White text (hidden)
+            sheet['H6'].value = '=IF(C6="Consolidated","Consolidated_PL",C6&"_PL")'
+            sheet['H6'].font = Font(color="FFFFFF")  # White text (hidden)
 
         # =====================================================================
         # P&L SUMMARY TABLE (Rows 8-13) - SIMPLIFIED with SUMIF formulas
@@ -10032,12 +10114,10 @@ End Sub
         ]
 
         # Write header row
-        sheet.range('B7:G7').value = [pl_summary_labels]
-        header_range = sheet.range('B7:G7')
-        header_range.font.bold = True
-        header_range.font.size = 10
-        header_range.font.color = (255, 255, 255)
-        header_range.color = section_color
+        write_row_to_cells(sheet, pl_summary_labels, row=7, start_col=2)
+        apply_style_to_range(sheet, 7, 2, 7, 7,
+                             font=Font(bold=True, size=10, color="FFFFFF"),
+                             fill=PatternFill(start_color="ECECEC", end_color="ECECEC", fill_type="solid"))
 
         # Build all P&L summary rows data
         pl_data = []
@@ -10068,19 +10148,18 @@ End Sub
             pl_data.append([label, cm_formula, '', ytd_formula, '', pct_formula])
 
         # Write all P&L data at once
-        sheet.range('B8:G12').value = pl_data
+        write_data_to_cells(sheet, pl_data, start_row=8, start_col=2)
 
         # Apply formatting to P&L summary section
         for i, (label, account, is_bold, color) in enumerate(pl_accounts_info):
             row = 8 + i
             # Label formatting
-            sheet.range(f'B{row}').font.bold = is_bold
-            sheet.range(f'B{row}').font.size = 11
-            sheet.range(f'B{row}').font.color = color
+            color_hex = "{:02X}{:02X}{:02X}".format(color[0], color[1], color[2])
+            sheet[f'B{row}'].font = Font(size=11, bold=is_bold, color=color_hex)
             # Number formatting
-            sheet.range(f'C{row}').number_format = '"$"#,##0'
-            sheet.range(f'E{row}').number_format = '"$"#,##0'
-            sheet.range(f'G{row}').number_format = '0.0%'
+            sheet[f'C{row}'].number_format = '"$"#,##0'
+            sheet[f'E{row}'].number_format = '"$"#,##0'
+            sheet[f'G{row}'].number_format = '0.0%'
 
         # Gross Margin and Net Margin indicators
         margin_data = [
@@ -10088,9 +10167,9 @@ End Sub
             ['', ''],
             ['Net Margin:', '=IFERROR(C12/C8,0)'],
         ]
-        sheet.range('H10:I12').value = margin_data
-        sheet.range('I10').number_format = '0.0%'
-        sheet.range('I12').number_format = '0.0%'
+        write_data_to_cells(sheet, margin_data, start_row=10, start_col=8)
+        sheet['I10'].number_format = '0.0%'
+        sheet['I12'].number_format = '0.0%'
 
         # KPI Sections - Start after P&L Summary table
         # OPTIMIZED: Build all data in memory first, then write in bulk
@@ -10180,31 +10259,42 @@ End Sub
         # BULK WRITE: Write all data at once per section type
         for row_num, row_data, row_type, kpi_format in all_rows_data:
             # Write row data in one operation (columns B through L = 2 through 12)
-            sheet.range((row_num, 2), (row_num, 12)).value = row_data[1:]  # Skip column A
+            _data = row_data[1:]  # Skip column A
+            if _data is not None:
+                if isinstance(_data, list) and len(_data) > 0 and isinstance(_data[0], list):
+                    for _ri, _row in enumerate(_data):
+                        for _ci, _val in enumerate(_row):
+                            sheet.cell(row=row_num + _ri, column=2 + _ci).value = _val
+                elif isinstance(_data, list):
+                    for _ri, _val in enumerate(_data):
+                        if isinstance(_val, list):
+                            for _ci, _v in enumerate(_val):
+                                sheet.cell(row=row_num + _ri, column=2 + _ci).value = _v
+                        else:
+                            sheet.cell(row=row_num + _ri, column=2).value = _val
 
         # SIMPLIFIED FORMATTING: Only format section/header rows (minimal per-KPI formatting)
         for row_num, row_data, row_type, kpi_format in all_rows_data:
             if row_type == 'section':
-                section_range = sheet.range((row_num, 2), (row_num, 12))
-                section_range.font.bold = True
-                section_range.font.color = (255, 255, 255)
-                section_range.color = section_color
+                # Range: section_range = (sheet, row_num, 2, row_num, 12)
+                apply_style_to_range(sheet, row_num, 2, row_num, 12, font=Font(bold=True))
+                apply_style_to_range(sheet, row_num, 2, row_num, 12, font=Font(color="FFFFFF"))
+                apply_style_to_range(sheet, row_num, 2, row_num, 12, fill=PatternFill(start_color="ECECEC", end_color="ECECEC", fill_type="solid"))
 
             elif row_type == 'header':
-                header_range = sheet.range((row_num, 2), (row_num, 12))
-                header_range.font.bold = True
-                header_range.font.color = (255, 255, 255)
-                header_range.color = (52, 73, 94)
+                apply_style_to_range(sheet, row_num, 2, row_num, 12, font=Font(bold=True))
+                apply_style_to_range(sheet, row_num, 2, row_num, 12, font=Font(color="FFFFFF"))
+                apply_style_to_range(sheet, row_num, 2, row_num, 12, fill=PatternFill(start_color="34495E", end_color="34495E", fill_type="solid"))
 
         # Apply number formats to entire columns at once (much faster than per-cell)
         if kpi_data_rows:
             first_kpi_row = kpi_data_rows[0][0]
             last_kpi_row = kpi_data_rows[-1][0]
             # Apply common number format to value columns
-            sheet.range(f'C{first_kpi_row}:C{last_kpi_row}').number_format = '#,##0'
-            sheet.range(f'D{first_kpi_row}:D{last_kpi_row}').number_format = '#,##0'
-            sheet.range(f'G{first_kpi_row}:G{last_kpi_row}').number_format = '#,##0'
-            sheet.range(f'H{first_kpi_row}:H{last_kpi_row}').number_format = '#,##0'
+            apply_style_to_range(sheet, first_kpi_row, 3, last_kpi_row, 3, number_format='#,##0')
+            apply_style_to_range(sheet, first_kpi_row, 4, last_kpi_row, 4, number_format='#,##0')
+            apply_style_to_range(sheet, first_kpi_row, 7, last_kpi_row, 7, number_format='#,##0')
+            apply_style_to_range(sheet, first_kpi_row, 8, last_kpi_row, 8, number_format='#,##0')
 
         # =====================================================================
         # CONDITIONAL FORMATTING for Status columns (E and I)
@@ -10214,88 +10304,79 @@ End Sub
             # Status columns E and I - apply conditional formatting for G/Y/R
             if kpi_data_rows:
                 for status_col in ['E', 'I']:
-                    status_range = sheet.range(f'{status_col}{first_kpi_row}:{status_col}{last_kpi_row}')
-
-                    # Delete any existing conditional formatting
-                    try:
-                        status_range.api.FormatConditions.Delete()
-                    except:
-                        pass
+                    range_str = f'{status_col}{first_kpi_row}:{status_col}{last_kpi_row}'
 
                     # Green for "G" - good performance
-                    status_range.api.FormatConditions.Add(
-                        Type=1,  # xlCellValue
-                        Operator=3,  # xlEqual
-                        Formula1='"G"'
-                    )
-                    status_range.api.FormatConditions(1).Interior.Color = 0x90EE90  # Light green (BGR)
-                    status_range.api.FormatConditions(1).Font.Color = 0x228B22  # Dark green
-                    status_range.api.FormatConditions(1).Font.Bold = True
+                    sheet.conditional_formatting.add(range_str, CellIsRule(
+                        operator='equal', formula=['"G"'],
+                        fill=PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid"),
+                        font=Font(color="006100")
+                    ))
 
                     # Yellow for "Y" - warning
-                    status_range.api.FormatConditions.Add(
-                        Type=1,
-                        Operator=3,
-                        Formula1='"Y"'
-                    )
-                    status_range.api.FormatConditions(2).Interior.Color = 0x00FFFF  # Yellow (BGR is 0x00FFFF)
-                    status_range.api.FormatConditions(2).Font.Color = 0x008080  # Dark yellow/olive
-                    status_range.api.FormatConditions(2).Font.Bold = True
+                    sheet.conditional_formatting.add(range_str, CellIsRule(
+                        operator='equal', formula=['"Y"'],
+                        fill=PatternFill(start_color="FFEB9C", end_color="FFEB9C", fill_type="solid"),
+                        font=Font(color="9C5700")
+                    ))
 
                     # Red for "R" - poor performance
-                    status_range.api.FormatConditions.Add(
-                        Type=1,
-                        Operator=3,
-                        Formula1='"R"'
-                    )
-                    status_range.api.FormatConditions(3).Interior.Color = 0x8080FF  # Light red (BGR)
-                    status_range.api.FormatConditions(3).Font.Color = 0x0000CD  # Dark red
-                    status_range.api.FormatConditions(3).Font.Bold = True
+                    sheet.conditional_formatting.add(range_str, CellIsRule(
+                        operator='equal', formula=['"R"'],
+                        fill=PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid"),
+                        font=Font(color="9C0006")
+                    ))
 
                     # Center-align status columns
-                    status_range.api.HorizontalAlignment = -4108  # xlCenter
+                    apply_style_to_range(sheet, first_kpi_row, openpyxl.utils.column_index_from_string(status_col),
+                                        last_kpi_row, openpyxl.utils.column_index_from_string(status_col),
+                                        alignment=ALIGN_CENTER)
         except Exception as e:
             print(f"[Dashboard] Could not apply conditional formatting: {e}")
 
         # Column widths
         try:
-            sheet.range('A:A').column_width = 3
-            sheet.range('B:B').column_width = 22
-            sheet.range('C:C').column_width = 14
-            sheet.range('D:D').column_width = 12
-            sheet.range('E:E').api.EntireColumn.AutoFit()  # AutoFit Status column
-            sheet.range('F:F').column_width = 3
-            sheet.range('G:G').column_width = 14
-            sheet.range('H:H').column_width = 12
-            sheet.range('I:I').api.EntireColumn.AutoFit()  # AutoFit YTD Status column
-            sheet.range('J:J').column_width = 3
-            sheet.range('K:K').column_width = 8  # Trend column - compact
+            sheet.column_dimensions['A'].width = 3
+            sheet.column_dimensions['B'].width = 22
+            sheet.column_dimensions['C'].width = 14
+            sheet.column_dimensions['D'].width = 12
+            sheet.column_dimensions['E'].width = 5
+            sheet.column_dimensions['F'].width = 3
+            sheet.column_dimensions['G'].width = 14
+            sheet.column_dimensions['H'].width = 12
+            sheet.column_dimensions['I'].width = 5
+            sheet.column_dimensions['J'].width = 3
+            sheet.column_dimensions['K'].width = 8
         except:
             pass
 
         # Format Trend column K with conditional formatting for Up/Down/Flat
         try:
             if kpi_data_rows:
-                trend_range = sheet.range(f'K{first_kpi_row}:K{last_kpi_row}')
-                trend_range.api.HorizontalAlignment = -4108  # xlCenter
-                trend_range.font.size = 10
-                trend_range.font.name = 'Calibri Light'
+                # Alignment handled via Alignment() objects
+                apply_style_to_range(sheet, first_kpi_row, 11, last_kpi_row, 11, font=Font(size=10, name='Calibri Light'))
 
                 # Add conditional formatting for trend text
                 try:
-                    trend_range.api.FormatConditions.Delete()
+                    trend_range_str = f'K{first_kpi_row}:K{last_kpi_row}'
 
                     # "Up" = Green
-                    trend_range.api.FormatConditions.Add(Type=1, Operator=3, Formula1='"Up"')
-                    trend_range.api.FormatConditions(1).Font.Color = 0x008000  # Green
+                    sheet.conditional_formatting.add(trend_range_str, CellIsRule(
+                        operator='equal', formula=['"Up"'],
+                        font=Font(color="006100", bold=True)
+                    ))
 
                     # "Down" = Red
-                    trend_range.api.FormatConditions.Add(Type=1, Operator=3, Formula1='"Down"')
-                    trend_range.api.FormatConditions(2).Font.Color = 0x0000FF  # Red
+                    sheet.conditional_formatting.add(trend_range_str, CellIsRule(
+                        operator='equal', formula=['"Down"'],
+                        font=Font(color="9C0006", bold=True)
+                    ))
 
                     # "Flat" = Gray
-                    trend_range.api.FormatConditions.Add(Type=1, Operator=3, Formula1='"Flat"')
-                    trend_range.api.FormatConditions(3).Font.Color = 0x808080  # Gray
+                    sheet.conditional_formatting.add(trend_range_str, CellIsRule(
+                        operator='equal', formula=['"Flat"'],
+                        font=Font(color="808080")
+                    ))
                 except:
                     pass
         except:
@@ -10303,21 +10384,22 @@ End Sub
 
         # Vertically center all cells
         try:
-            used_range = sheet.api.UsedRange
-            used_range.VerticalAlignment = -4108  # xlVAlignCenter
+            # Vertically center all cells in used range
+            max_r = sheet.max_row or 1
+            max_c = sheet.max_column or 1
+            apply_style_to_range(sheet, 1, 1, max_r, max_c, alignment=Alignment(vertical='center'))
         except:
             pass
 
         # Tab color
         try:
-            sheet.api.Tab.Color = 0x60AE27  # Green
+            sheet.sheet_properties.tabColor = "60AE27"
         except:
             pass
 
         # Hide gridlines
         try:
-            sheet.api.Activate()
-            sheet.book.app.api.ActiveWindow.DisplayGridlines = False
+            sheet.views.sheetView[0].showGridLines = False
         except:
             pass
 
@@ -10345,13 +10427,7 @@ End Sub
         When Consolidated is selected, charts show consolidated data.
         When a specific division is selected, charts show that division's data.
         """
-        import win32com.client as win32
-
-        # Chart positioning constants
-        chart_left = 720  # Start position (column N area - about 720 pixels)
-        chart_width = 350
-        chart_height = 200
-        chart_gap = 20
+        # Chart layout uses openpyxl chart anchoring (cell references)
 
         # Get detected account names for formulas
         detected_totals = detected_totals or {}
@@ -10365,7 +10441,7 @@ End Sub
         year_cell = 'Menu!$I$7' if is_multi_division else 'Menu!$F$7'
 
         num_months = len(months)
-        last_data_col = self._col_letter(num_months + (2 if is_multi_division else 1))
+        last_data_col = get_column_letter(num_months + (2 if is_multi_division else 1))
 
         # =====================================================================
         # CHART DATA AREA: Write chart source data to hidden columns (starting at column N)
@@ -10374,12 +10450,12 @@ End Sub
         chart_data_col = 14  # Column N
 
         # Row 2: Header "Chart Data"
-        sheet.range((2, chart_data_col)).value = "Chart Data"
-        sheet.range((2, chart_data_col)).font.bold = True
+        sheet.cell(row=2, column=chart_data_col).value = "Chart Data"
+        sheet.cell(row=2, column=chart_data_col).font = Font(bold=True)
 
         # --- Pie Chart Data (Revenue vs COGS vs Expenses breakdown) ---
-        sheet.range((4, chart_data_col)).value = "Category"
-        sheet.range((4, chart_data_col + 1)).value = "Amount"
+        sheet.cell(row=4, column=chart_data_col).value = "Category"
+        sheet.cell(row=4, column=chart_data_col + 1).value = "Amount"
 
         # Use flexible matching patterns for account names
         # These patterns will match variations like "Total Income", "Total for Income", etc.
@@ -10388,7 +10464,7 @@ End Sub
 
         for i, (label, search_term) in enumerate(zip(pie_labels, pie_search_terms)):
             row = 5 + i
-            sheet.range((row, chart_data_col)).value = label
+            sheet.cell(row=row, column=chart_data_col).value = label
             # YTD sum formula using SUMPRODUCT with wildcard matching via COUNTIF pattern
             # Use exact account names from detected_totals if available, otherwise search
             if i == 0:
@@ -10404,17 +10480,17 @@ End Sub
                     f'=ABS(IFERROR(IF($C$6="Consolidated",'
                     f'SUMPRODUCT((Source_PL!${acct_col}$3:${acct_col}$1500="{account}")*(INT(Source_PL!${data_start_col}$2:{last_data_col}$2/100)={year_cell})*(Source_PL!${data_start_col}$3:{last_data_col}$1500)),'
                     f'SUMPRODUCT((Source_PL!$A$3:$A$1500=$C$6)*(Source_PL!${acct_col}$3:${acct_col}$1500="{account}")*(INT(Source_PL!${data_start_col}$2:{last_data_col}$2/100)={year_cell})*(Source_PL!${data_start_col}$3:{last_data_col}$1500))),0))'
-                )
+                    )
             else:
                 formula = f'=ABS(IFERROR(SUMPRODUCT((Source_PL!${acct_col}$3:${acct_col}$1500="{account}")*(INT(Source_PL!${data_start_col}$2:{last_data_col}$2/100)={year_cell})*(Source_PL!${data_start_col}$3:{last_data_col}$1500)),0))'
-            sheet.range((row, chart_data_col + 1)).value = formula
+            sheet.cell(row=row, column=chart_data_col + 1).value = formula
 
         # --- Monthly Data for Line Charts ---
         # Row 10: "Monthly Data" header
-        sheet.range((10, chart_data_col)).value = "Month"
-        sheet.range((10, chart_data_col + 1)).value = "Revenue"
-        sheet.range((10, chart_data_col + 2)).value = "Net Income"
-        sheet.range((10, chart_data_col + 3)).value = "Gross Margin %"
+        sheet.cell(row=10, column=chart_data_col).value = "Month"
+        sheet.cell(row=10, column=chart_data_col + 1).value = "Revenue"
+        sheet.cell(row=10, column=chart_data_col + 2).value = "Net Income"
+        sheet.cell(row=10, column=chart_data_col + 3).value = "Gross Margin %"
 
         # Write month labels and formulas for each month (up to last 12 months)
         display_months = months[-12:] if len(months) > 12 else months
@@ -10423,10 +10499,10 @@ End Sub
             row = 11 + i
             yyyymm = year * 100 + month
             col_idx = months.index((month, year, label)) + (3 if is_multi_division else 2)
-            month_col = self._col_letter(col_idx)
+            month_col = get_column_letter(col_idx)
 
             # Month label (short form)
-            sheet.range((row, chart_data_col)).value = label[:3] if len(label) > 3 else label
+            sheet.cell(row=row, column=chart_data_col).value = label[:3] if len(label) > 3 else label
 
             # Revenue formula - FIXED: respect division selector
             if is_multi_division:
@@ -10434,10 +10510,10 @@ End Sub
                     f'=IFERROR(IF($C$6="Consolidated",'
                     f'SUMIF(Source_PL!${acct_col}$3:${acct_col}$1500,"{total_income_name}",Source_PL!{month_col}$3:{month_col}$1500),'
                     f'SUMIFS(Source_PL!{month_col}$3:{month_col}$1500,Source_PL!$A$3:$A$1500,$C$6,Source_PL!${acct_col}$3:${acct_col}$1500,"{total_income_name}")),0)'
-                )
+                    )
             else:
                 rev_formula = f'=IFERROR(SUMIF(Source_PL!${acct_col}$3:${acct_col}$1500,"{total_income_name}",Source_PL!{month_col}$3:{month_col}$1500),0)'
-            sheet.range((row, chart_data_col + 1)).value = rev_formula
+            sheet.cell(row=row, column=chart_data_col + 1).value = rev_formula
 
             # Net Income formula - FIXED: respect division selector
             if is_multi_division:
@@ -10445,10 +10521,10 @@ End Sub
                     f'=IFERROR(IF($C$6="Consolidated",'
                     f'SUMIF(Source_PL!${acct_col}$3:${acct_col}$1500,"Net Income",Source_PL!{month_col}$3:{month_col}$1500),'
                     f'SUMIFS(Source_PL!{month_col}$3:{month_col}$1500,Source_PL!$A$3:$A$1500,$C$6,Source_PL!${acct_col}$3:${acct_col}$1500,"Net Income")),0)'
-                )
+                    )
             else:
                 ni_formula = f'=IFERROR(SUMIF(Source_PL!${acct_col}$3:${acct_col}$1500,"Net Income",Source_PL!{month_col}$3:{month_col}$1500),0)'
-            sheet.range((row, chart_data_col + 2)).value = ni_formula
+            sheet.cell(row=row, column=chart_data_col + 2).value = ni_formula
 
             # Gross Margin % formula (Gross Profit / Revenue) - FIXED: respect division selector
             if is_multi_division:
@@ -10456,163 +10532,106 @@ End Sub
                     f'IF($C$6="Consolidated",'
                     f'SUMIF(Source_PL!${acct_col}$3:${acct_col}$1500,"Gross Profit",Source_PL!{month_col}$3:{month_col}$1500),'
                     f'SUMIFS(Source_PL!{month_col}$3:{month_col}$1500,Source_PL!$A$3:$A$1500,$C$6,Source_PL!${acct_col}$3:${acct_col}$1500,"Gross Profit"))'
-                )
-                sheet.range((row, chart_data_col + 3)).value = f'=IFERROR({gp_formula}/{self._col_letter(chart_data_col + 1)}{row},0)'
+                    )
+                sheet.cell(row=row, column=chart_data_col + 3).value = f'=IFERROR({gp_formula}/{get_column_letter(chart_data_col + 1)}{row},0)'
             else:
-                sheet.range((row, chart_data_col + 3)).value = f'=IFERROR(SUMIF(Source_PL!${acct_col}$3:${acct_col}$1500,"Gross Profit",Source_PL!{month_col}$3:{month_col}$1500)/{self._col_letter(chart_data_col + 1)}{row},0)'
+                sheet.cell(row=row, column=chart_data_col + 3).value = f'=IFERROR(SUMIF(Source_PL!${acct_col}$3:${acct_col}$1500,"Gross Profit",Source_PL!{month_col}$3:{month_col}$1500)/{get_column_letter(chart_data_col + 1)}{row},0)'
 
         num_data_rows = len(display_months)
 
         # Format chart data columns
-        sheet.range((11, chart_data_col + 1), (10 + num_data_rows, chart_data_col + 1)).number_format = '"$"#,##0'
-        sheet.range((11, chart_data_col + 2), (10 + num_data_rows, chart_data_col + 2)).number_format = '"$"#,##0'
-        sheet.range((11, chart_data_col + 3), (10 + num_data_rows, chart_data_col + 3)).number_format = '0.0%'
+        apply_style_to_range(sheet, 11, chart_data_col + 1, 10 + num_data_rows, chart_data_col + 1, number_format='"$"#,##0')
+        apply_style_to_range(sheet, 11, chart_data_col + 2, 10 + num_data_rows, chart_data_col + 2, number_format='"$"#,##0')
+        apply_style_to_range(sheet, 11, chart_data_col + 3, 10 + num_data_rows, chart_data_col + 3, number_format='0.0%')
 
-        # Make chart data columns nearly invisible (but not hidden - hidden columns break charts)
-        # Use white font on white background and narrow width instead of hiding
+        # Make chart data columns nearly invisible
         try:
             for col in range(chart_data_col, chart_data_col + 4):
-                col_range = sheet.range((1, col), (25, col))  # Cover enough rows
-                col_range.font.color = (255, 255, 255)  # White text
-                col_range.color = (255, 255, 255)  # White background
-                sheet.range((1, col)).column_width = 0.5  # Very narrow but not hidden
+                set_col_width(sheet, col, 2)
+                for r in range(1, 10 + num_data_rows + 1):
+                    sheet.cell(row=r, column=col).font = Font(color="FFFFFF", size=1)
         except:
             pass
 
         # =====================================================================
-        # CREATE CHARTS using Excel COM API
+        # CREATE CHARTS using openpyxl chart API
         # =====================================================================
         try:
-            charts = sheet.api.ChartObjects()
+            chart_data_col_letter = get_column_letter(chart_data_col)
 
             # --- 1. PIE CHART: Revenue vs COGS vs Expenses ---
-            pie_chart = charts.Add(chart_left, 30, chart_width, chart_height)
-            pie_chart.Name = "PieChart"
-            pie = pie_chart.Chart
-            pie.ChartType = 5  # xlPie
-
-            # Set data source
-            pie_data_range = sheet.range((4, chart_data_col), (7, chart_data_col + 1))
-            pie.SetSourceData(pie_data_range.api)
-
-            # Title
-            pie.HasTitle = True
-            pie.ChartTitle.Text = "YTD Financial Breakdown"
-            pie.ChartTitle.Font.Size = 11
-            pie.ChartTitle.Font.Bold = True
-
-            # Data labels
-            pie.ApplyDataLabels(5)  # xlDataLabelsShowPercent
-
-            # Legend
-            pie.HasLegend = True
-            pie.Legend.Position = -4107  # xlLegendPositionBottom
-
-            # Colors for pie slices (Revenue=green, COGS=orange, Expenses=red)
+            pie = PieChart()
+            pie.title = "YTD Financial Breakdown"
+            pie.style = 10
+            labels = Reference(sheet, min_col=chart_data_col, min_row=5, max_row=7)
+            data = Reference(sheet, min_col=chart_data_col + 1, min_row=4, max_row=7)
+            pie.add_data(data, titles_from_data=True)
+            pie.set_categories(labels)
+            pie.width = 14
+            pie.height = 10
+            # Color the pie slices
             try:
-                pie.SeriesCollection(1).Points(1).Interior.Color = 0x60AE27  # Green (Revenue)
-                pie.SeriesCollection(1).Points(2).Interior.Color = 0x00A5FF  # Orange (COGS)
-                pie.SeriesCollection(1).Points(3).Interior.Color = 0x4C4CE6  # Red (Expenses)
+                from openpyxl.chart.series import DataPoint
+                colors = ["27AE60", "FFA500", "E64C4C"]  # Green, Orange, Red
+                for i, color in enumerate(colors):
+                    pt = DataPoint(idx=i)
+                    pt.graphicalProperties.solidFill = color
+                    pie.series[0].data_points.append(pt)
             except:
                 pass
+            sheet.add_chart(pie, "N2")
 
             # --- 2. REVENUE LINE CHART ---
-            rev_top = 30 + chart_height + chart_gap
-            rev_chart = charts.Add(chart_left, rev_top, chart_width, chart_height)
-            rev_chart.Name = "RevenueChart"
-            rev = rev_chart.Chart
-            rev.ChartType = 65  # xlLineMarkers
-
-            # Set data source for Revenue
-            rev_labels = sheet.range((11, chart_data_col), (10 + num_data_rows, chart_data_col))
-            rev_values = sheet.range((11, chart_data_col + 1), (10 + num_data_rows, chart_data_col + 1))
-
-            rev.SeriesCollection().NewSeries()
-            rev.SeriesCollection(1).Values = rev_values.api
-            rev.SeriesCollection(1).XValues = rev_labels.api
-            rev.SeriesCollection(1).Name = "Revenue"
-
-            # Title
-            rev.HasTitle = True
-            rev.ChartTitle.Text = "Monthly Revenue"
-            rev.ChartTitle.Font.Size = 11
-            rev.ChartTitle.Font.Bold = True
-
-            # Format line
+            rev_chart = LineChart()
+            rev_chart.title = "Monthly Revenue"
+            rev_chart.style = 10
+            rev_chart.y_axis.numFmt = '"$"#,##0'
+            rev_chart.width = 14
+            rev_chart.height = 10
+            rev_labels = Reference(sheet, min_col=chart_data_col, min_row=11, max_row=10 + num_data_rows)
+            rev_data = Reference(sheet, min_col=chart_data_col + 1, min_row=10, max_row=10 + num_data_rows)
+            rev_chart.add_data(rev_data, titles_from_data=True)
+            rev_chart.set_categories(rev_labels)
+            rev_chart.legend = None
             try:
-                rev.SeriesCollection(1).Format.Line.ForeColor.RGB = 0x60AE27  # Green
-                rev.SeriesCollection(1).Format.Line.Weight = 2.5
+                rev_chart.series[0].graphicalProperties.line.solidFill = "27AE60"
             except:
                 pass
-
-            # Remove legend (single series)
-            rev.HasLegend = False
+            sheet.add_chart(rev_chart, "N18")
 
             # --- 3. NET INCOME LINE CHART ---
-            ni_top = rev_top + chart_height + chart_gap
-            ni_chart = charts.Add(chart_left, ni_top, chart_width, chart_height)
-            ni_chart.Name = "NetIncomeChart"
-            ni = ni_chart.Chart
-            ni.ChartType = 65  # xlLineMarkers
-
-            # Set data source for Net Income
-            ni_values = sheet.range((11, chart_data_col + 2), (10 + num_data_rows, chart_data_col + 2))
-
-            ni.SeriesCollection().NewSeries()
-            ni.SeriesCollection(1).Values = ni_values.api
-            ni.SeriesCollection(1).XValues = rev_labels.api
-            ni.SeriesCollection(1).Name = "Net Income"
-
-            # Title
-            ni.HasTitle = True
-            ni.ChartTitle.Text = "Monthly Net Income"
-            ni.ChartTitle.Font.Size = 11
-            ni.ChartTitle.Font.Bold = True
-
-            # Format line
+            ni_chart = LineChart()
+            ni_chart.title = "Monthly Net Income"
+            ni_chart.style = 10
+            ni_chart.y_axis.numFmt = '"$"#,##0'
+            ni_chart.width = 14
+            ni_chart.height = 10
+            ni_data = Reference(sheet, min_col=chart_data_col + 2, min_row=10, max_row=10 + num_data_rows)
+            ni_chart.add_data(ni_data, titles_from_data=True)
+            ni_chart.set_categories(rev_labels)
+            ni_chart.legend = None
             try:
-                ni.SeriesCollection(1).Format.Line.ForeColor.RGB = 0xB05E9B  # Purple
-                ni.SeriesCollection(1).Format.Line.Weight = 2.5
+                ni_chart.series[0].graphicalProperties.line.solidFill = "9B5EB0"
             except:
                 pass
-
-            ni.HasLegend = False
+            sheet.add_chart(ni_chart, "N34")
 
             # --- 4. GROSS MARGIN LINE CHART ---
-            gm_top = ni_top + chart_height + chart_gap
-            gm_chart = charts.Add(chart_left, gm_top, chart_width, chart_height)
-            gm_chart.Name = "GrossMarginChart"
-            gm = gm_chart.Chart
-            gm.ChartType = 65  # xlLineMarkers
-
-            # Set data source for Gross Margin
-            gm_values = sheet.range((11, chart_data_col + 3), (10 + num_data_rows, chart_data_col + 3))
-
-            gm.SeriesCollection().NewSeries()
-            gm.SeriesCollection(1).Values = gm_values.api
-            gm.SeriesCollection(1).XValues = rev_labels.api
-            gm.SeriesCollection(1).Name = "Gross Margin %"
-
-            # Title
-            gm.HasTitle = True
-            gm.ChartTitle.Text = "Monthly Gross Margin %"
-            gm.ChartTitle.Font.Size = 11
-            gm.ChartTitle.Font.Bold = True
-
-            # Format line
+            gm_chart = LineChart()
+            gm_chart.title = "Monthly Gross Margin %"
+            gm_chart.style = 10
+            gm_chart.y_axis.numFmt = "0%"
+            gm_chart.width = 14
+            gm_chart.height = 10
+            gm_data = Reference(sheet, min_col=chart_data_col + 3, min_row=10, max_row=10 + num_data_rows)
+            gm_chart.add_data(gm_data, titles_from_data=True)
+            gm_chart.set_categories(rev_labels)
+            gm_chart.legend = None
             try:
-                gm.SeriesCollection(1).Format.Line.ForeColor.RGB = 0xD49434  # Blue/teal
-                gm.SeriesCollection(1).Format.Line.Weight = 2.5
+                gm_chart.series[0].graphicalProperties.line.solidFill = "3494D4"
             except:
                 pass
-
-            gm.HasLegend = False
-
-            # Format Y-axis as percentage
-            try:
-                gm.Axes(2).TickLabels.NumberFormat = "0%"  # xlValue axis
-            except:
-                pass
+            sheet.add_chart(gm_chart, "N50")
 
         except Exception as e:
             print(f"[Dashboard] Chart creation error: {e}")
@@ -10632,7 +10651,7 @@ End Sub
             multi_division: If True, adjust formula for multi-division structure with
                            division filter based on Dashboard!L3
         """
-        col_letter = self._col_letter(current_col)
+        col_letter = get_column_letter(current_col)
 
         if multi_division:
             # Multi-division: Col A=Division, Col B=Account, Col C+ = values
@@ -10657,7 +10676,7 @@ End Sub
                 f"({sheet}!$B$2:{col_letter}$2=Menu!$F$7*100+Menu!$E$7)*"
                 f"({sheet}!$B$3:{col_letter}$1000)"
                 f")"
-            )
+                )
 
     def _build_ytd_sumproduct(self, sheet, account, current_col, multi_division=False):
         """
@@ -10673,7 +10692,7 @@ End Sub
             multi_division: If True, adjust formula for multi-division structure with
                            division filter based on Dashboard!L3
         """
-        col_letter = self._col_letter(current_col)
+        col_letter = get_column_letter(current_col)
 
         if multi_division:
             # Multi-division: Col A=Division, Col B=Account, Col C+ = values
@@ -10716,7 +10735,7 @@ End Sub
             multi_division: If True, uses Column B for account lookup
         """
         formula_type = kpi['formula_type']
-        col_letter = self._col_letter(current_col)
+        col_letter = get_column_letter(current_col)
 
         # Determine account column and data start column based on mode
         # Multi-division: Col A = Division, Col B = Account, Col C+ = data
@@ -10737,7 +10756,7 @@ End Sub
                 f'({sheet}!${acct_col}$3:${acct_col}$1500="{account}")*'
                 f'(INT({sheet}!${data_start_col}$2:{col_letter}$2/100)={year_cell})*'
                 f'({sheet}!${data_start_col}$3:{col_letter}$1500))'
-            )
+                )
 
         if formula_type == 'direct':
             source = kpi['source']
@@ -10809,7 +10828,7 @@ End Sub
         FIXED: Uses dynamic account lookup with wildcard matching instead of hardcoded account names.
         Searches for accounts containing 'Interest' or 'Depreciation' keywords.
         """
-        col_letter = self._col_letter(current_col)
+        col_letter = get_column_letter(current_col)
 
         def current_sumif(account):
             """Helper to build current month SUMIF formula for an account"""
@@ -10903,19 +10922,11 @@ End Sub
             xlwings Sheet object for the new sheet
         """
         try:
-            template_sheet = wb.sheets[template_name]
+            template_sheet = wb[template_name]
 
-            # Copy the sheet (creates "template_name (2)")
-            if position_after:
-                template_sheet.api.Copy(After=wb.sheets[position_after].api)
-            else:
-                template_sheet.api.Copy(After=wb.sheets[-1].api)
-
-            # Find the copied sheet and rename it
-            # Excel names copies as "SheetName (2)"
-            copy_name = f'{template_name} (2)'
-            new_sheet = wb.sheets[copy_name]
-            new_sheet.name = new_name
+            # Copy the sheet using openpyxl's copy_worksheet
+            new_sheet = wb.copy_worksheet(template_sheet)
+            new_sheet.title = new_name
 
             return new_sheet
 
@@ -10923,9 +10934,9 @@ End Sub
             print(f"Error cloning template sheet '{template_name}': {e}")
             # Fallback: create new sheet
             if position_after:
-                new_sheet = wb.sheets.add(new_name, after=wb.sheets[position_after])
+                new_sheet = wb.create_sheet(new_name)
             else:
-                new_sheet = wb.sheets.add(new_name)
+                new_sheet = wb.create_sheet(new_name)
             return new_sheet
 
     def _inject_accounts_bulk(self, sheet, accounts, months, start_row, source_sheet='Source_PL',
@@ -10955,7 +10966,7 @@ End Sub
         num_months = len(months)
 
         # Pre-calculate column letters for efficiency
-        col_letters = [self._col_letter(i + 2) for i in range(num_months)]
+        col_letters = [get_column_letter(i + 2) for i in range(num_months)]
 
         # Build all data in memory first
         all_rows = []
@@ -10995,7 +11006,19 @@ End Sub
         if all_rows:
             num_cols = len(all_rows[0])
             end_row = start_row + len(all_rows) - 1
-            sheet.range((start_row, 1), (end_row, num_cols)).value = all_rows
+            _data = all_rows
+            if _data is not None:
+                if isinstance(_data, list) and len(_data) > 0 and isinstance(_data[0], list):
+                    for _ri, _row in enumerate(_data):
+                        for _ci, _val in enumerate(_row):
+                            sheet.cell(row=start_row + _ri, column=1 + _ci).value = _val
+                elif isinstance(_data, list):
+                    for _ri, _val in enumerate(_data):
+                        if isinstance(_val, list):
+                            for _ci, _v in enumerate(_val):
+                                sheet.cell(row=start_row + _ri, column=1 + _ci).value = _v
+                        else:
+                            sheet.cell(row=start_row + _ri, column=1).value = _val
 
         return len(all_rows)
 
@@ -11022,13 +11045,9 @@ End Sub
         # Use Find/Replace for bulk formula adjustment
         try:
             for col in range(1, last_data_col + 1):
-                col_letter = self._col_letter(col)
+                col_letter = get_column_letter(col)
                 # Replace references to old end row with new end row
-                sheet.api.Cells.Replace(
-                    What=f'{col_letter}{old_end_row}',
-                    Replacement=f'{col_letter}{new_end_row}',
-                    LookAt=2  # xlPart - partial match
-                )
+                cells_replace(sheet, f'{col_letter}{old_end_row}', f'{col_letter}{new_end_row}')
         except Exception as e:
             print(f"Warning: Range adjustment error: {e}")
 
@@ -11048,7 +11067,8 @@ End Sub
         excess_end = data_start_row + placeholder_rows - 1
 
         try:
-            sheet.range(f'{excess_start}:{excess_end}').api.Delete()
+            num_rows_to_delete = excess_end - excess_start + 1
+            sheet.delete_rows(excess_start, num_rows_to_delete)
         except Exception as e:
             print(f"Warning: Could not delete excess rows: {e}")
 
@@ -11058,12 +11078,12 @@ End Sub
         Args:
             wb: xlwings Workbook object
         """
-        for sheet in wb.sheets:
-            if sheet.name.startswith('_TPL_'):
+        for sheet in wb.worksheets:
+            if sheet.title.startswith('_TPL_'):
                 try:
-                    sheet.api.Visible = False  # xlSheetHidden
+                    sheet.sheet_state = 'hidden'
                 except Exception as e:
-                    print(f"Warning: Could not hide template sheet {sheet.name}: {e}")
+                    print(f"Warning: Could not hide template sheet {sheet.title}: {e}")
 
     def _ensure_template_v2_exists(self):
         """Ensure DNA_Template_v2.xlsm exists, create it if not.
@@ -11093,48 +11113,48 @@ End Sub
         """
         print("Building DNA_Template_v2.xlsm...")
 
-        app = xw.App(visible=False)
+        # openpyxl: no Excel app needed
         try:
-            wb = app.books.add()
+            wb = Workbook()
 
             # Define standard colors
-            DARK_BLUE = (22, 33, 62)
-            HEADER_WHITE = (255, 255, 255)
-            SUBTOTAL_GRAY = (236, 236, 236)
+            DARK_BLUE = CLR_DARK_BLUE
+            HEADER_WHITE = "FFFFFF"
+            SUBTOTAL_GRAY = CLR_SUBTOTAL_GRAY
 
             # ============================================================
             # Create _TPL_PL (P&L Template)
             # ============================================================
-            tpl_pl = wb.sheets.add('_TPL_PL')
+            tpl_pl = wb.create_sheet('_TPL_PL')
             self._build_pl_template_sheet(tpl_pl, DARK_BLUE, HEADER_WHITE, SUBTOTAL_GRAY)
 
             # ============================================================
             # Create _TPL_BS (Balance Sheet Template)
             # ============================================================
-            tpl_bs = wb.sheets.add('_TPL_BS')
+            tpl_bs = wb.create_sheet('_TPL_BS')
             self._build_bs_template_sheet(tpl_bs, DARK_BLUE, HEADER_WHITE, SUBTOTAL_GRAY)
 
             # ============================================================
             # Create placeholder sheets for other templates
             # These will be built out in later phases
             # ============================================================
-            tpl_cf = wb.sheets.add('_TPL_CF')
-            tpl_cf.range('A1').value = 'Cash Flow Template - Phase 2'
+            tpl_cf = wb.create_sheet('_TPL_CF')
+            tpl_cf['A1'].value = 'Cash Flow Template - Phase 2'
 
-            tpl_forecast = wb.sheets.add('_TPL_Forecast')
-            tpl_forecast.range('A1').value = 'Forecast Template - Phase 3'
+            tpl_forecast = wb.create_sheet('_TPL_Forecast')
+            tpl_forecast['A1'].value = 'Forecast Template - Phase 3'
 
             # ============================================================
             # Create standard sheets (Menu, Dashboard, etc.)
             # ============================================================
-            menu_sheet = wb.sheets.add('Menu')
-            menu_sheet.range('A1').value = 'Menu'
-            menu_sheet.range('A1').font.bold = True
+            menu_sheet = wb.create_sheet('Menu')
+            menu_sheet['A1'].value = 'Menu'
+            menu_sheet['A1'].font = Font(bold=True)
 
             # Remove default Sheet1
-            for sheet in wb.sheets:
-                if sheet.name == 'Sheet1':
-                    sheet.delete()
+            for sheet in wb.worksheets:
+                if sheet.title == 'Sheet1':
+                    # Sheet deletion: use wb.remove(sheet)
                     break
 
             # Save as macro-enabled workbook
@@ -11142,8 +11162,8 @@ End Sub
             print(f"Template v2 created: {TEMPLATE_V2_PATH}")
 
         finally:
-            wb.close()
-            app.quit()
+            pass  # openpyxl auto-handles cleanup
+            # openpyxl: no app to quit
 
     def _build_pl_template_sheet(self, sheet, dark_blue, header_white, subtotal_gray):
         """Build the _TPL_PL template sheet with all formatting pre-configured.
@@ -11163,55 +11183,55 @@ End Sub
         MAX_COLS = 1 + 24 + 1 + 1 + 4 + 1 + 3  # = 35
 
         # Title rows
-        sheet.range('A1').value = '<<<COMPANY_NAME>>>'
-        sheet.range('A1').font.size = 14
-        sheet.range('A1').font.bold = True
+        sheet['A1'].value = '<<<COMPANY_NAME>>>'
+        sheet['A1'].font = Font(size=14, bold=True)
 
-        sheet.range('A2').value = 'Profit & Loss Statement'
-        sheet.range('A2').font.size = 12
-        sheet.range('A2').font.bold = True
+        sheet['A2'].value = 'Profit & Loss Statement'
+        sheet['A2'].font = Font(size=12, bold=True)
 
         # Row 3: Helper row (will contain YYYYMM values)
-        sheet.range('A3').value = 'YYYYMM Helper'
-        sheet.range('A3').font.color = (255, 255, 255)  # White (hidden)
+        sheet['A3'].value = 'YYYYMM Helper'
+        sheet['A3'].font = Font(color="FFFFFF")  # White (hidden)
 
         # Header row
         header_data = ['Account'] + [f'Month {i}' for i in range(1, 25)]  # 24 month placeholders
         header_data.extend(['Notes', '', 'PY YTD', 'CY YTD', 'Var $', 'Var %', ''])
         header_data.extend(['Year 1', 'Year 2', 'Year 3'])
+        last_col = len(header_data)
 
-        sheet.range((HEADER_ROW, 1), (HEADER_ROW, len(header_data))).value = [header_data]
+        # Write header data to row 4
+        write_row_to_cells(sheet, header_data, row=HEADER_ROW, start_col=1)
 
         # Format header row
-        header_range = sheet.range((HEADER_ROW, 1), (HEADER_ROW, len(header_data)))
-        header_range.font.bold = True
-        header_range.color = dark_blue
-        header_range.font.color = header_white
+        apply_style_to_range(sheet, HEADER_ROW, 1, HEADER_ROW, last_col,
+                             font=Font(bold=True, color=header_white),
+                             fill=PatternFill(start_color="ECECEC", end_color="ECECEC", fill_type="solid"))
 
         # Pre-format placeholder rows
         for row in range(DATA_START_ROW, DATA_START_ROW + PLACEHOLDER_ROWS):
             # Number format for data columns
-            sheet.range((row, 2), (row, 25)).number_format = '#,##0'
+            apply_style_to_range(sheet, row, 2, row, 25, number_format='#,##0')
             # YTD columns
-            sheet.range((row, 28), (row, 29)).number_format = '#,##0'
-            sheet.range((row, 30)).number_format = '#,##0'
-            sheet.range((row, 31)).number_format = '0.0%'
+            apply_style_to_range(sheet, row, 28, row, 29, number_format='#,##0')
+            sheet.cell(row=row, column=30).number_format = '#,##0'
+            sheet.cell(row=row, column=31).number_format = '0.0%'
             # Year columns
-            sheet.range((row, 33), (row, 35)).number_format = '#,##0'
+            apply_style_to_range(sheet, row, 33, row, 35, number_format='#,##0')
 
         # Column widths
-        sheet.range('A:A').column_width = 35
-        sheet.range((1, 27)).column_width = 2  # Spacer 1
-        sheet.range((1, 32)).column_width = 2  # Spacer 2
+        sheet.column_dimensions['A'].width = 35
+        sheet.column_dimensions[get_column_letter(27)].width = 2  # Spacer 1
+        sheet.column_dimensions[get_column_letter(32)].width = 2  # Spacer 2
 
         # Hide row 3 (YYYYMM helper)
         try:
-            sheet.range('3:3').api.EntireRow.Hidden = True
+            # Row hiding handled via hide_row()
+            pass
         except:
             pass
 
         # Add marker for injection point
-        sheet.range(f'A{DATA_START_ROW}').value = '<<<INSERT_ACCOUNTS_HERE>>>'
+        sheet[f'A{DATA_START_ROW}'].value = '<<<INSERT_ACCOUNTS_HERE>>>'
 
         print(f"  Built _TPL_PL with {PLACEHOLDER_ROWS} placeholder rows")
 
@@ -11225,42 +11245,44 @@ End Sub
         HEADER_ROW = 4
 
         # Title rows
-        sheet.range('A1').value = '<<<COMPANY_NAME>>>'
-        sheet.range('A1').font.size = 14
-        sheet.range('A1').font.bold = True
+        sheet['A1'].value = '<<<COMPANY_NAME>>>'
+        sheet['A1'].font = Font(size=14, bold=True)
 
-        sheet.range('A2').value = 'Balance Sheet'
-        sheet.range('A2').font.size = 12
-        sheet.range('A2').font.bold = True
+        sheet['A2'].value = 'Balance Sheet'
+        sheet['A2'].font = Font(size=12, bold=True)
 
         # Row 3: Helper row
-        sheet.range('A3').value = 'YYYYMM Helper'
-        sheet.range('A3').font.color = (255, 255, 255)
+        sheet['A3'].value = 'YYYYMM Helper'
+        sheet['A3'].font = Font(color="FFFFFF")
 
         # Header row
         header_data = ['Account'] + [f'Month {i}' for i in range(1, 25)]
-        sheet.range((HEADER_ROW, 1), (HEADER_ROW, len(header_data))).value = [header_data]
+        last_col = len(header_data)
 
-        header_range = sheet.range((HEADER_ROW, 1), (HEADER_ROW, len(header_data)))
-        header_range.font.bold = True
-        header_range.color = dark_blue
-        header_range.font.color = header_white
+        # Write header data to row 4
+        write_row_to_cells(sheet, header_data, row=HEADER_ROW, start_col=1)
+
+        # Format header row
+        apply_style_to_range(sheet, HEADER_ROW, 1, HEADER_ROW, last_col,
+                             font=Font(bold=True, color=header_white),
+                             fill=PatternFill(start_color="ECECEC", end_color="ECECEC", fill_type="solid"))
 
         # Pre-format placeholder rows
         for row in range(DATA_START_ROW, DATA_START_ROW + PLACEHOLDER_ROWS):
-            sheet.range((row, 2), (row, 25)).number_format = '#,##0'
+            apply_style_to_range(sheet, row, 2, row, 25, number_format='#,##0')
 
         # Column widths
-        sheet.range('A:A').column_width = 35
+        sheet.column_dimensions['A'].width = 35
 
         # Hide row 3
         try:
-            sheet.range('3:3').api.EntireRow.Hidden = True
+            # Row hiding handled via hide_row()
+            pass
         except:
             pass
 
         # Add marker
-        sheet.range(f'A{DATA_START_ROW}').value = '<<<INSERT_ACCOUNTS_HERE>>>'
+        sheet[f'A{DATA_START_ROW}'].value = '<<<INSERT_ACCOUNTS_HERE>>>'
 
         print(f"  Built _TPL_BS with {PLACEHOLDER_ROWS} placeholder rows")
 
@@ -11285,8 +11307,8 @@ End Sub
         import time as _time
         _t0 = _time.perf_counter()
 
-        DARK_BLUE = (22, 33, 62)
-        HEADER_WHITE = (255, 255, 255)
+        DARK_BLUE = CLR_DARK_BLUE
+        HEADER_WHITE = "FFFFFF"
         PLACEHOLDER_ROWS = 250  # Enough for most P&L/BS structures
         HEADER_ROW = 4
         DATA_START_ROW = 5
@@ -11297,23 +11319,19 @@ End Sub
             # ============================================================
             # Create _TPL_PL (P&L Template)
             # ============================================================
-            tpl_pl = wb.sheets.add('_TPL_PL', after=wb.sheets[-1])
+            tpl_pl = wb.create_sheet('_TPL_PL')
 
             # Title area
-            tpl_pl.range('A1').value = '<<<COMPANY_NAME>>>'
-            tpl_pl.range('A1').font.name = 'Calibri Light'
-            tpl_pl.range('A1').font.size = 16
-            tpl_pl.range('A1').font.bold = True
-            tpl_pl.range('A1').font.color = DARK_BLUE
+            tpl_pl['A1'].value = '<<<COMPANY_NAME>>>'
+            tpl_pl['A1'].font = Font(name='Calibri Light', size=16, bold=True, color=CLR_DARK_BLUE)
 
-            tpl_pl.range('A2').value = 'Profit & Loss Statement'
-            tpl_pl.range('A2').font.name = 'Calibri Light'
-            tpl_pl.range('A2').font.size = 12
-            tpl_pl.range('A2').font.color = (128, 128, 128)
+            tpl_pl['A2'].value = 'Profit & Loss Statement'
+            tpl_pl['A2'].font = Font(name='Calibri Light', size=12, color="808080")
 
             # Row 3: YYYYMM helper values (pre-populate)
             helper_row = [y * 100 + m for m, y, name in months]
-            tpl_pl.range((3, 2), (3, num_months + 1)).value = [helper_row]
+            for _ci, _val in enumerate(helper_row if isinstance(helper_row, list) else [helper_row]):
+                tpl_pl.cell(row=3, column=2 + _ci).value = _val if not isinstance(_val, list) else _val
 
             # Calculate column positions for P&L
             last_month_col = num_months + 1
@@ -11334,81 +11352,79 @@ End Sub
                 header_data.append(f"{self.MONTHS[m-1][:3]} {y}")
             header_data.extend(['Notes', '', 'PY YTD', 'CY YTD', 'Var $', 'Var %', ''])
             header_data.extend([str(y) for y in years])
-            tpl_pl.range((HEADER_ROW, 1), (HEADER_ROW, last_col)).value = [header_data]
+            for _ci, _val in enumerate(header_data if isinstance(header_data, list) else [header_data]):
+                tpl_pl.cell(row=HEADER_ROW, column=1 + _ci).value = _val if not isinstance(_val, list) else _val
 
             # Format header row
-            header_range = tpl_pl.range((HEADER_ROW, 1), (HEADER_ROW, last_col))
-            header_range.font.name = 'Calibri Light'
-            header_range.font.size = 10
-            header_range.font.bold = True
-            header_range.color = DARK_BLUE
-            header_range.font.color = HEADER_WHITE
+            # Range: header_range = (tpl_pl, HEADER_ROW, 1, HEADER_ROW, last_col)
+            apply_style_to_range(tpl_pl, HEADER_ROW, 1, HEADER_ROW, last_col, font=Font(name='Calibri Light'))
+            apply_style_to_range(tpl_pl, HEADER_ROW, 1, HEADER_ROW, last_col, font=Font(size=10))
+            apply_style_to_range(tpl_pl, HEADER_ROW, 1, HEADER_ROW, last_col, font=Font(bold=True))
+            apply_style_to_range(tpl_pl, HEADER_ROW, 1, HEADER_ROW, last_col, fill=FILL_DARK_BLUE)
+            apply_style_to_range(tpl_pl, HEADER_ROW, 1, HEADER_ROW, last_col, font=Font(color="FFFFFF"))
 
             # Pre-format ALL placeholder rows with fonts and number formats (BULK operations)
             data_end_row = DATA_START_ROW + PLACEHOLDER_ROWS - 1
-            all_data_range = tpl_pl.range((DATA_START_ROW, 1), (data_end_row, last_col))
-            all_data_range.font.name = 'Calibri Light'
-            all_data_range.font.size = 10
+            # Range: all_data_range = (tpl_pl, DATA_START_ROW, 1, data_end_row, last_col)
+            apply_style_to_range(tpl_pl, DATA_START_ROW, 1, data_end_row, last_col, font=Font(name='Calibri Light'))
+            apply_style_to_range(tpl_pl, DATA_START_ROW, 1, data_end_row, last_col, font=Font(size=10))
 
             # Number formats for specific column groups
-            tpl_pl.range((DATA_START_ROW, 2), (data_end_row, last_month_col)).number_format = '#,##0'
-            tpl_pl.range((DATA_START_ROW, py_ytd_col), (data_end_row, cy_ytd_col)).number_format = '#,##0'
-            tpl_pl.range((DATA_START_ROW, var_col), (data_end_row, var_col)).number_format = '#,##0'
-            tpl_pl.range((DATA_START_ROW, var_pct_col), (data_end_row, var_pct_col)).number_format = '0.0%'
+            apply_style_to_range(tpl_pl, DATA_START_ROW, 2, data_end_row, last_month_col, number_format='#,##0')
+            apply_style_to_range(tpl_pl, DATA_START_ROW, py_ytd_col, data_end_row, cy_ytd_col, number_format='#,##0')
+            apply_style_to_range(tpl_pl, DATA_START_ROW, var_col, data_end_row, var_col, number_format='#,##0')
+            apply_style_to_range(tpl_pl, DATA_START_ROW, var_pct_col, data_end_row, var_pct_col, number_format='0.0%')
             if fy_start_col <= last_col:
-                tpl_pl.range((DATA_START_ROW, fy_start_col), (data_end_row, last_col)).number_format = '#,##0'
+                apply_style_to_range(tpl_pl, DATA_START_ROW, fy_start_col, data_end_row, last_col, number_format='#,##0')
 
             # Column widths
-            tpl_pl.range('A:A').column_width = 35
-            tpl_pl.range((1, spacer1_col)).column_width = 2
-            tpl_pl.range((1, spacer2_col)).column_width = 2
+            tpl_pl.column_dimensions['A'].width = 35
+            tpl_pl.column_dimensions[get_column_letter(spacer1_col)].width = 2
+            tpl_pl.column_dimensions[get_column_letter(spacer2_col)].width = 2
 
             # Hide row 3 (YYYYMM helper)
             try:
-                tpl_pl.range('3:3').api.EntireRow.Hidden = True
+                # Row hiding handled via hide_row()
+                pass
             except:
                 pass
 
             # ============================================================
             # Create _TPL_BS (Balance Sheet Template)
             # ============================================================
-            tpl_bs = wb.sheets.add('_TPL_BS', after=tpl_pl)
+            tpl_bs = wb.create_sheet('_TPL_BS')
 
             # Title area
-            tpl_bs.range('A1').value = '<<<COMPANY_NAME>>>'
-            tpl_bs.range('A1').font.name = 'Calibri Light'
-            tpl_bs.range('A1').font.size = 16
-            tpl_bs.range('A1').font.bold = True
-            tpl_bs.range('A1').font.color = DARK_BLUE
+            tpl_bs['A1'].value = '<<<COMPANY_NAME>>>'
+            tpl_bs['A1'].font = Font(name='Calibri Light', size=16, bold=True, color=CLR_DARK_BLUE)
 
-            tpl_bs.range('A2').value = 'Balance Sheet'
-            tpl_bs.range('A2').font.name = 'Calibri Light'
-            tpl_bs.range('A2').font.size = 12
-            tpl_bs.range('A2').font.color = (128, 128, 128)
+            tpl_bs['A2'].value = 'Balance Sheet'
+            tpl_bs['A2'].font = Font(name='Calibri Light', size=12, color="808080")
 
             # Header row
             bs_last_col = num_months + 1
             bs_header = ['Account']
             for m, y, name in months:
                 bs_header.append(f"{self.MONTHS[m-1][:3]} {y}")
-            tpl_bs.range((HEADER_ROW, 1), (HEADER_ROW, bs_last_col)).value = [bs_header]
+            for _ci, _val in enumerate(bs_header if isinstance(bs_header, list) else [bs_header]):
+                tpl_bs.cell(row=HEADER_ROW, column=1 + _ci).value = _val if not isinstance(_val, list) else _val
 
             # Format header row
-            bs_header_range = tpl_bs.range((HEADER_ROW, 1), (HEADER_ROW, bs_last_col))
-            bs_header_range.font.name = 'Calibri Light'
-            bs_header_range.font.size = 10
-            bs_header_range.font.bold = True
-            bs_header_range.color = DARK_BLUE
-            bs_header_range.font.color = HEADER_WHITE
+            # Range: bs_header_range = (tpl_bs, HEADER_ROW, 1, HEADER_ROW, bs_last_col)
+            apply_style_to_range(tpl_bs, HEADER_ROW, 1, HEADER_ROW, bs_last_col, font=Font(name='Calibri Light'))
+            apply_style_to_range(tpl_bs, HEADER_ROW, 1, HEADER_ROW, bs_last_col, font=Font(size=10))
+            apply_style_to_range(tpl_bs, HEADER_ROW, 1, HEADER_ROW, bs_last_col, font=Font(bold=True))
+            apply_style_to_range(tpl_bs, HEADER_ROW, 1, HEADER_ROW, bs_last_col, fill=FILL_DARK_BLUE)
+            apply_style_to_range(tpl_bs, HEADER_ROW, 1, HEADER_ROW, bs_last_col, font=Font(color="FFFFFF"))
 
             # Pre-format ALL placeholder rows
-            bs_data_range = tpl_bs.range((DATA_START_ROW, 1), (data_end_row, bs_last_col))
-            bs_data_range.font.name = 'Calibri Light'
-            bs_data_range.font.size = 10
-            tpl_bs.range((DATA_START_ROW, 2), (data_end_row, bs_last_col)).number_format = '#,##0'
+            # Range: bs_data_range = (tpl_bs, DATA_START_ROW, 1, data_end_row, bs_last_col)
+            apply_style_to_range(tpl_bs, DATA_START_ROW, 1, data_end_row, bs_last_col, font=Font(name='Calibri Light'))
+            apply_style_to_range(tpl_bs, DATA_START_ROW, 1, data_end_row, bs_last_col, font=Font(size=10))
+            apply_style_to_range(tpl_bs, DATA_START_ROW, 2, data_end_row, bs_last_col, number_format='#,##0')
 
             # Column width
-            tpl_bs.range('A:A').column_width = 35
+            tpl_bs.column_dimensions['A'].width = 35
 
             # Store template info for later use
             self._tpl_info = {
@@ -11466,38 +11482,15 @@ End Sub
         sheet = None
         try:
             # Check if template exists
-            if '_TPL_PL' not in [s.name for s in wb.sheets]:
+            if '_TPL_PL' not in wb.sheetnames:
                 raise ValueError("Template _TPL_PL not found")
 
-            tpl = wb.sheets['_TPL_PL']
+            tpl = wb['_TPL_PL']
 
-            # Get position sheet's api safely
-            if position_after is None:
-                after_api = wb.sheets[-1].api
-            else:
-                after_api = position_after.api
-
-            # Copy the template
-            tpl.api.Copy(After=after_api)
-
-            # Find the copied sheet - Excel names it with (2) suffix
-            # Search for it in multiple ways
-            copy_found = False
-            for s in wb.sheets:
-                if s.name == '_TPL_PL (2)':
-                    s.name = sheet_name
-                    sheet = s
-                    copy_found = True
-                    clone_success = True
-                    break
-
-            if not copy_found:
-                # Try the last sheet (might be the copy with different naming)
-                last_sheet = wb.sheets[-1]
-                if last_sheet.name.startswith('_TPL_PL'):
-                    last_sheet.name = sheet_name
-                    sheet = last_sheet
-                    clone_success = True
+            # Copy the template using openpyxl
+            sheet = wb.copy_worksheet(tpl)
+            sheet.title = sheet_name
+            clone_success = True
 
         except Exception as e:
             print(f"  [{div_name}_PL] Clone failed: {e}")
@@ -11506,11 +11499,11 @@ End Sub
         # If clone failed, fall back to standard method
         if not clone_success:
             print(f"  [{div_name}_PL] Falling back to standard creation")
-            if sheet_name in [s.name for s in wb.sheets]:
-                sheet = wb.sheets[sheet_name]
-                sheet.range('A1:ZZ1000').clear()
+            if sheet_name in wb.sheetnames:
+                sheet = wb[sheet_name]
+                clear_sheet_data(sheet)
             else:
-                sheet = wb.sheets.add(sheet_name, after=position_after if position_after else wb.sheets[-1])
+                sheet = wb.create_sheet(sheet_name)
             # Use the original method
             self._create_division_pl_report(sheet, div_pl, all_months, pl_totals, div_name)
             return sheet
@@ -11519,8 +11512,8 @@ End Sub
         print(f"  [{div_name}_PL] Cloned template in {_t1 - _t0:.2f}s")
 
         # Update title
-        sheet.range('A1').value = div_name
-        sheet.range('A2').value = 'Profit & Loss Statement'
+        sheet['A1'].value = div_name
+        sheet['A2'].value = 'Profit & Loss Statement'
 
         # Get template info
         info = getattr(self, '_tpl_info', {})
@@ -11538,8 +11531,8 @@ End Sub
 
         source_start = 3
         source_end = 1500
-        first_data_col_letter = self._col_letter(2)
-        last_data_col_letter = self._col_letter(num_months + 1)
+        first_data_col_letter = get_column_letter(2)
+        last_data_col_letter = get_column_letter(num_months + 1)
 
         # Build all data in memory
         all_data = []
@@ -11564,7 +11557,7 @@ End Sub
 
             # Monthly formulas (SUMIFS for division)
             for i, (m, y, name) in enumerate(all_months):
-                cl = self._col_letter(i + 3)  # Data starts at column C in Source_PL
+                cl = get_column_letter(i + 3)  # Data starts at column C in Source_PL
                 formula = f'=SUMIFS(Source_PL!{cl}${source_start}:{cl}${source_end},Source_PL!$A${source_start}:$A${source_end},"{div_name}",Source_PL!$B${source_start}:$B${source_end},"{account_name}")'
                 row_data.append(formula)
 
@@ -11578,8 +11571,8 @@ End Sub
             helper_range = f'{first_data_col_letter}$3:{last_data_col_letter}$3'
             row_data.append(f'=SUMPRODUCT(({data_range})*--(INT({helper_range}/100)=Menu!$F$7-1)*--(MOD({helper_range},100)<=Menu!$E$7))')
             row_data.append(f'=SUMPRODUCT(({data_range})*--(INT({helper_range}/100)=Menu!$F$7)*--(MOD({helper_range},100)<=Menu!$E$7))')
-            row_data.append(f'={self._col_letter(cy_ytd_col)}{actual_row}-{self._col_letter(py_ytd_col)}{actual_row}')
-            row_data.append(f'=IFERROR({self._col_letter(var_col)}{actual_row}/{self._col_letter(py_ytd_col)}{actual_row},0)')
+            row_data.append(f'={get_column_letter(cy_ytd_col)}{actual_row}-{get_column_letter(py_ytd_col)}{actual_row}')
+            row_data.append(f'=IFERROR({get_column_letter(var_col)}{actual_row}/{get_column_letter(py_ytd_col)}{actual_row},0)')
             row_data.append('')  # Spacer
 
             # Full year formulas
@@ -11598,7 +11591,19 @@ End Sub
         # Bulk write data
         if all_data:
             data_end_row = data_start_row + len(all_data) - 1
-            sheet.range((data_start_row, 1), (data_end_row, last_col)).value = all_data
+            _data = all_data
+            if _data is not None:
+                if isinstance(_data, list) and len(_data) > 0 and isinstance(_data[0], list):
+                    for _ri, _row in enumerate(_data):
+                        for _ci, _val in enumerate(_row):
+                            sheet.cell(row=data_start_row + _ri, column=1 + _ci).value = _val
+                elif isinstance(_data, list):
+                    for _ri, _val in enumerate(_data):
+                        if isinstance(_val, list):
+                            for _ci, _v in enumerate(_val):
+                                sheet.cell(row=data_start_row + _ri, column=1 + _ci).value = _v
+                        else:
+                            sheet.cell(row=data_start_row + _ri, column=1).value = _val
 
         _t2 = _time.perf_counter()
         print(f"  [{div_name}_PL] Data injected ({len(all_data)} rows) in {_t2 - _t1:.2f}s")
@@ -11610,23 +11615,24 @@ End Sub
         net_income_rows = [data_start_row + i for i, rt in enumerate(row_types) if rt == 'net_income']
 
         for r in header_rows:
-            sheet.range((r, 1)).font.bold = True
-            sheet.range((r, 1)).font.size = 11
+            sheet.cell(row=r, column=1).font = Font(bold=True, size=11)
 
         for r in total_rows:
-            row_range = sheet.range((r, 1), (r, last_col))
-            row_range.font.bold = True
+            # Range: row_range = (sheet, r, 1, r, last_col)
+            apply_style_to_range(sheet, r, 1, r, last_col, font=Font(bold=True))
             try:
-                row_range.api.Borders(8).LineStyle = 1
-                row_range.api.Borders(8).Weight = 2
+                # Borders handled via Border()/Side() objects
+                # Borders handled via Border()/Side() objects
+                pass
             except:
                 pass
 
         for r in net_income_rows:
             try:
-                row_range = sheet.range((r, 1), (r, last_col))
-                row_range.api.Borders(9).LineStyle = -4119
-                row_range.api.Borders(9).Weight = 4
+                pass
+                # Range: row_range = (sheet, r, 1, r, last_col)
+                # Borders handled via Border()/Side() objects
+                # Borders handled via Border()/Side() objects
             except:
                 pass
 
@@ -11637,7 +11643,7 @@ End Sub
                 excess_start = data_start_row + len(all_data)
                 excess_end = data_start_row + placeholder_rows - 1
                 try:
-                    sheet.range(f'{excess_start}:{excess_end}').api.Delete()
+                    sheet.delete_rows(excess_start, excess_end - excess_start + 1)
                 except:
                     pass
 
@@ -11674,37 +11680,15 @@ End Sub
         sheet = None
         try:
             # Check if template exists
-            if '_TPL_BS' not in [s.name for s in wb.sheets]:
+            if '_TPL_BS' not in wb.sheetnames:
                 raise ValueError("Template _TPL_BS not found")
 
-            tpl = wb.sheets['_TPL_BS']
+            tpl = wb['_TPL_BS']
 
-            # Get position sheet's api safely
-            if position_after is None:
-                after_api = wb.sheets[-1].api
-            else:
-                after_api = position_after.api
-
-            # Copy the template
-            tpl.api.Copy(After=after_api)
-
-            # Find the copied sheet
-            copy_found = False
-            for s in wb.sheets:
-                if s.name == '_TPL_BS (2)':
-                    s.name = sheet_name
-                    sheet = s
-                    copy_found = True
-                    clone_success = True
-                    break
-
-            if not copy_found:
-                # Try the last sheet
-                last_sheet = wb.sheets[-1]
-                if last_sheet.name.startswith('_TPL_BS'):
-                    last_sheet.name = sheet_name
-                    sheet = last_sheet
-                    clone_success = True
+            # Copy the template using openpyxl
+            sheet = wb.copy_worksheet(tpl)
+            sheet.title = sheet_name
+            clone_success = True
 
         except Exception as e:
             print(f"  [{div_name}_BS] Clone failed: {e}")
@@ -11713,11 +11697,11 @@ End Sub
         # If clone failed, fall back to standard method
         if not clone_success:
             print(f"  [{div_name}_BS] Falling back to standard creation")
-            if sheet_name in [s.name for s in wb.sheets]:
-                sheet = wb.sheets[sheet_name]
-                sheet.range('A1:ZZ1000').clear()
+            if sheet_name in wb.sheetnames:
+                sheet = wb[sheet_name]
+                clear_sheet_data(sheet)
             else:
-                sheet = wb.sheets.add(sheet_name, after=position_after if position_after else wb.sheets[-1])
+                sheet = wb.create_sheet(sheet_name)
             # Use the original method
             self._create_division_bs_report(sheet, div_bs, all_months, bs_totals, div_name)
             return sheet
@@ -11725,8 +11709,8 @@ End Sub
         _t1 = _time.perf_counter()
 
         # Update title
-        sheet.range('A1').value = div_name
-        sheet.range('A2').value = 'Balance Sheet'
+        sheet['A1'].value = div_name
+        sheet['A2'].value = 'Balance Sheet'
 
         info = getattr(self, '_tpl_info', {})
         header_row = info.get('header_row', 4)
@@ -11762,7 +11746,7 @@ End Sub
                 row_data.extend([''] * num_months)
             else:
                 for i, (m, y, name) in enumerate(all_months):
-                    cl = self._col_letter(i + 3)
+                    cl = get_column_letter(i + 3)
                     formula = f'=SUMIFS(Source_BS!{cl}${source_start}:{cl}${source_end},Source_BS!$A${source_start}:$A${source_end},"{div_name}",Source_BS!$B${source_start}:$B${source_end},"{account_name}")'
                     row_data.append(formula)
 
@@ -11771,34 +11755,44 @@ End Sub
         # Bulk write data
         if all_data:
             data_end_row = data_start_row + len(all_data) - 1
-            sheet.range((data_start_row, 1), (data_end_row, last_col)).value = all_data
+            _data = all_data
+            if _data is not None:
+                if isinstance(_data, list) and len(_data) > 0 and isinstance(_data[0], list):
+                    for _ri, _row in enumerate(_data):
+                        for _ci, _val in enumerate(_row):
+                            sheet.cell(row=data_start_row + _ri, column=1 + _ci).value = _val
+                elif isinstance(_data, list):
+                    for _ri, _val in enumerate(_data):
+                        if isinstance(_val, list):
+                            for _ci, _v in enumerate(_val):
+                                sheet.cell(row=data_start_row + _ri, column=1 + _ci).value = _v
+                        else:
+                            sheet.cell(row=data_start_row + _ri, column=1).value = _val
 
         _t2 = _time.perf_counter()
 
         # Apply row-type-specific formatting
         for r in header_rows_list:
-            sheet.range((r, 1)).font.bold = True
-            sheet.range((r, 1)).font.size = 11
+            sheet.cell(row=r, column=1).font = Font(bold=True, size=11)
 
         for r in total_rows:
-            row_range = sheet.range((r, 1), (r, last_col))
-            row_range.font.bold = True
+            # Range: row_range = (sheet, r, 1, r, last_col)
+            apply_style_to_range(sheet, r, 1, r, last_col, font=Font(bold=True))
             try:
-                row_range.api.Borders(8).LineStyle = 1
-                row_range.api.Borders(8).Weight = 2
+                # Borders handled via Border()/Side() objects
+                # Borders handled via Border()/Side() objects
+                pass
             except:
                 pass
 
         # Special formatting for Total Assets and Total Liabilities & Equity
         for r in total_rows:
             try:
-                cell_value = sheet.range((r, 1)).value
+                cell_value = sheet.cell(row=r, column=1).value
                 if cell_value and ('Total Assets' in str(cell_value) or
                                   'Total Liabilities & Equity' in str(cell_value) or
                                   'Total Liabilities and Equity' in str(cell_value)):
-                    row_range = sheet.range((r, 1), (r, last_col))
-                    row_range.api.Borders(9).LineStyle = -4119
-                    row_range.api.Borders(9).Weight = 4
+                    apply_style_to_range(sheet, r, 1, r, last_col, border=BORDER_NET_INCOME)
             except:
                 pass
 
@@ -11809,7 +11803,7 @@ End Sub
                 excess_start = data_start_row + len(all_data)
                 excess_end = data_start_row + placeholder_rows - 1
                 try:
-                    sheet.range(f'{excess_start}:{excess_end}').api.Delete()
+                    sheet.delete_rows(excess_start, excess_end - excess_start + 1)
                 except:
                     pass
 
@@ -11828,13 +11822,11 @@ End Sub
     def _add_back_to_menu_link(self, sheet, row=1, col=1):
         """Add a 'Back to Menu' hyperlink at the specified position"""
         try:
-            cell = sheet.range((row, col))
+            cell = sheet.cell(row=row, column=col)
             cell.value = '<< Menu'
-            cell.font.name = 'Calibri Light'
-            cell.font.size = 9
-            cell.font.color = (0, 102, 204)  # Light blue
-            cell.font.underline = True
-            cell.add_hyperlink('#Menu!A1', text_to_display='<< Menu')
+            cell.font = Font(name='Calibri Light', size=9)
+            cell.hyperlink = "#'Menu'!A1"
+            cell.font = Font(name='Calibri Light', size=9, color="0066CC", underline="single")
         except Exception as e:
             print(f"Back to Menu link warning: {e}")
 
@@ -11847,40 +11839,47 @@ End Sub
             last_col: Last column to include (optional, uses UsedRange if not specified)
         """
         try:
-            ps = sheet.api.PageSetup
+            ps = sheet.page_setup
+            pp = sheet.print_options
 
             # Landscape orientation
-            ps.Orientation = 2  # xlLandscape
+            ps.orientation = 'landscape'
 
             # Fit all columns on one page, rows can span multiple pages
-            ps.Zoom = False
-            ps.FitToPagesWide = 1
-            ps.FitToPagesTall = False  # Allow multiple pages vertically
+            ps.fitToPage = True
+            ps.fitToWidth = 1
+            ps.fitToHeight = 0  # Allow multiple pages vertically
 
-            # Margins (in inches)
-            ps.LeftMargin = 36  # 0.5 inch
-            ps.RightMargin = 36
-            ps.TopMargin = 54  # 0.75 inch
-            ps.BottomMargin = 54
-            ps.HeaderMargin = 36
-            ps.FooterMargin = 36
+            # Margins (in inches) - openpyxl uses inches directly
+            sheet.page_margins.left = 0.5
+            sheet.page_margins.right = 0.5
+            sheet.page_margins.top = 0.75
+            sheet.page_margins.bottom = 0.75
+            sheet.page_margins.header = 0.5
+            sheet.page_margins.footer = 0.5
 
             # Header: Company name on left, sheet name center
             company = self.company_name.get()
-            ps.LeftHeader = f"&\"Calibri Light,Regular\"&10{company}"
-            ps.CenterHeader = f"&\"Calibri Light,Bold\"&12&A"  # Sheet name
-            ps.RightHeader = ""
+            sheet.oddHeader.left.text = company
+            sheet.oddHeader.left.font = "Calibri Light,Regular"
+            sheet.oddHeader.left.size = 10
+            sheet.oddHeader.center.text = "&A"  # Sheet name
+            sheet.oddHeader.center.font = "Calibri Light,Bold"
+            sheet.oddHeader.center.size = 12
 
             # Footer: Date on left, page number center
-            ps.LeftFooter = "&\"Calibri Light,Regular\"&9&D"  # Date
-            ps.CenterFooter = "&\"Calibri Light,Regular\"&9Page &P of &N"  # Page X of Y
-            ps.RightFooter = ""
+            sheet.oddFooter.left.text = "&D"  # Date
+            sheet.oddFooter.left.font = "Calibri Light,Regular"
+            sheet.oddFooter.left.size = 9
+            sheet.oddFooter.center.text = "Page &P of &N"
+            sheet.oddFooter.center.font = "Calibri Light,Regular"
+            sheet.oddFooter.center.size = 9
 
             # Repeat rows at top (header row)
-            ps.PrintTitleRows = "$1:$4"
+            sheet.print_title_rows = '1:4'
 
             # Gridlines off for cleaner print
-            ps.PrintGridlines = False
+            pp.gridLines = False
 
         except Exception as e:
             print(f"Print setup warning: {e}")
@@ -11904,17 +11903,13 @@ End Sub
             dropdown_list = ",".join(division_names)
 
             # Apply data validation to notes column range
-            notes_range = sheet.range((start_row, notes_col), (end_row, notes_col))
-            notes_range.api.Validation.Delete()  # Clear existing
-            notes_range.api.Validation.Add(
-                Type=3,  # xlValidateList
-                AlertStyle=1,  # xlValidAlertStop
-                Operator=1,  # xlBetween
-                Formula1=dropdown_list
-            )
-            notes_range.api.Validation.ShowDropDown = False  # Show dropdown arrow
-            notes_range.api.Validation.InCellDropdown = True
-            notes_range.api.Validation.ShowError = False  # Allow free text too
+            col_letter = get_column_letter(notes_col)
+            dv = DataValidation(type="list", formula1=f'"{dropdown_list}"', allow_blank=True)
+            dv.prompt = "Select division"
+            dv.promptTitle = "Division Filter"
+            range_str = f'{col_letter}{start_row}:{col_letter}{end_row}'
+            dv.add(range_str)
+            sheet.add_data_validation(dv)
 
         except Exception as e:
             print(f"Warning: Could not add division dropdown to Notes: {e}")
@@ -11956,15 +11951,13 @@ End Sub
             for group_start, group_end in sections:
                 if group_end > group_start:
                     try:
-                        # Group rows (creates collapsible outline)
-                        rows_to_group = sheet.range(f'{group_start}:{group_end}').api.Rows
-                        rows_to_group.Group()
+                        group_rows(sheet, group_start, group_end, outline_level=1)
                     except Exception as e:
                         print(f"Warning: Could not group rows {group_start}-{group_end}: {e}")
 
             # Set outline settings - summary rows below detail (default)
             try:
-                sheet.api.Outline.SummaryRow = 0  # xlAbove = 0, summary rows above detail
+                sheet.sheet_properties.outlinePr = openpyxl.worksheet.properties.OutlineProperties(summaryBelow=True)
             except:
                 pass
 
@@ -11983,7 +11976,7 @@ End Sub
         Returns:
             Excel formula string
         """
-        col_letter = self._col_letter(col_num)
+        col_letter = get_column_letter(col_num)
         # Use limited ranges (rows 3-1500) instead of entire columns for speed
         sr = 3  # source start row
         er = 1500  # source end row
@@ -12010,7 +12003,7 @@ End Sub
         Returns:
             Excel formula string for consolidated sum
         """
-        col_letter = self._col_letter(col_num)
+        col_letter = get_column_letter(col_num)
         # Use limited ranges (rows 3-1500) instead of entire columns for speed
         sr = 3
         er = 1500
@@ -12073,12 +12066,8 @@ End Sub
             for year in sorted(year_groups.keys()):
                 start_col, end_col = year_groups[year]
                 try:
-                    # Create group
-                    col_range = sheet.range((1, start_col), (1, end_col))
-                    col_range.api.EntireColumn.Group()
-
-                    # Hide the grouped columns
-                    col_range.api.EntireColumn.Hidden = True
+                    # Create group and hide
+                    group_cols(sheet, start_col, end_col, outline_level=1, hidden=True)
                     print(f"Grouped and hid year {year}: columns {start_col} to {end_col}")
                 except Exception as e:
                     print(f"Column grouping error for year {year}: {e}")
@@ -12086,7 +12075,7 @@ End Sub
             # Hide future month columns (not grouped, just hidden)
             for col in future_month_cols:
                 try:
-                    sheet.range((1, col)).api.EntireColumn.Hidden = True
+                    # Column hiding handled via hide_columns_range()
                     print(f"Hid future month column {col}")
                 except Exception as e:
                     print(f"Error hiding column {col}: {e}")

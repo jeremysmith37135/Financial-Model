@@ -1,0 +1,91 @@
+
+============================================================
+[TIMING] P&L Report: Consolidated_PL - 2026-02-08 10:04:58
+============================================================
+  Accounts: 73, Months: 1, Rows written: 73
+  Setup:            0.0 ms
+  Build Data:       0.5 ms  (Python loop building formulas)
+  Write Excel:      3.6 ms  (Bulk write to Excel)
+  Formatting:      14.7 ms  (Number formats, column widths)
+  Validation:       1.7 ms  (Validation section)
+  ----------------------------------------
+  TOTAL:           20.6 ms (0.02 seconds)
+============================================================
+
+============================================================
+[TIMING] P&L Report: Consolidated_PL - 2026-02-08 10:16:58
+============================================================
+  Accounts: 73, Months: 1, Rows written: 73
+  Setup:            0.0 ms
+  Build Data:       0.6 ms  (Python loop building formulas)
+  Write Excel:      5.3 ms  (Bulk write to Excel)
+  Formatting:      17.7 ms  (Number formats, column widths)
+  Validation:       0.8 ms  (Validation section)
+  ----------------------------------------
+  TOTAL:           24.4 ms (0.02 seconds)
+============================================================
+
+============================================================
+[TIMING] P&L Report: Consolidated_PL - 2026-02-08 10:26:08
+============================================================
+  Accounts: 73, Months: 1, Rows written: 73
+  Setup:            0.0 ms
+  Build Data:       0.5 ms  (Python loop building formulas)
+  Write Excel:      5.1 ms  (Bulk write to Excel)
+  Formatting:      21.7 ms  (Number formats, column widths)
+  Validation:       1.4 ms  (Validation section)
+  ----------------------------------------
+  TOTAL:           28.7 ms (0.03 seconds)
+============================================================
+
+============================================================
+[TIMING] P&L Report: Consolidated_PL - 2026-02-08 10:29:17
+============================================================
+  Accounts: 73, Months: 1, Rows written: 73
+  Setup:            0.0 ms
+  Build Data:       0.7 ms  (Python loop building formulas)
+  Write Excel:      4.2 ms  (Bulk write to Excel)
+  Formatting:      12.7 ms  (Number formats, column widths)
+  Validation:       1.6 ms  (Validation section)
+  ----------------------------------------
+  TOTAL:           19.2 ms (0.02 seconds)
+============================================================
+
+============================================================
+[TIMING] P&L Report: Consolidated_PL - 2026-02-08 10:31:29
+============================================================
+  Accounts: 73, Months: 1, Rows written: 73
+  Setup:            0.0 ms
+  Build Data:       0.8 ms  (Python loop building formulas)
+  Write Excel:      4.5 ms  (Bulk write to Excel)
+  Formatting:      14.3 ms  (Number formats, column widths)
+  Validation:       0.7 ms  (Validation section)
+  ----------------------------------------
+  TOTAL:           20.4 ms (0.02 seconds)
+============================================================
+
+============================================================
+[TIMING] P&L Report: Consolidated_PL - 2026-02-08 10:40:38
+============================================================
+  Accounts: 73, Months: 1, Rows written: 73
+  Setup:            0.0 ms
+  Build Data:       0.7 ms  (Python loop building formulas)
+  Write Excel:      4.5 ms  (Bulk write to Excel)
+  Formatting:      15.2 ms  (Number formats, column widths)
+  Validation:       1.4 ms  (Validation section)
+  ----------------------------------------
+  TOTAL:           21.8 ms (0.02 seconds)
+============================================================
+
+============================================================
+[TIMING] P&L Report: Consolidated_PL - 2026-02-08 10:44:53
+============================================================
+  Accounts: 73, Months: 1, Rows written: 73
+  Setup:            0.0 ms
+  Build Data:       0.6 ms  (Python loop building formulas)
+  Write Excel:      4.6 ms  (Bulk write to Excel)
+  Formatting:      16.7 ms  (Number formats, column widths)
+  Validation:       1.9 ms  (Validation section)
+  ----------------------------------------
+  TOTAL:           23.9 ms (0.02 seconds)
+============================================================
