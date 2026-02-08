@@ -253,6 +253,41 @@ def cells_replace(sheet, old_text, new_text):
                 cell.value = cell.value.replace(old_text, new_text)
 
 
+def remove_filter_database_from_xlsx(filepath):
+    """Remove legacy _xlnm._FilterDatabase defined names from a saved .xlsx/.xlsm file.
+
+    openpyxl writes both a sheet-level <autoFilter> element AND a workbook-level
+    _xlnm._FilterDatabase named range. Excel considers the named range redundant
+    and flags 'Removed Records: Named range' during file repair. This function
+    removes the legacy named range while preserving the sheet-level autoFilter.
+    """
+    import zipfile
+    import re
+    import shutil
+
+    temp_path = filepath + '.tmp'
+    try:
+        with zipfile.ZipFile(filepath, 'r') as zin:
+            with zipfile.ZipFile(temp_path, 'w', zipfile.ZIP_DEFLATED) as zout:
+                for item in zin.infolist():
+                    data = zin.read(item.filename)
+                    if item.filename == 'xl/workbook.xml':
+                        content = data.decode('utf-8')
+                        # Remove _FilterDatabase defined name entries
+                        content = re.sub(
+                            r'<definedName[^>]*name="_xlnm\._FilterDatabase"[^>]*>[^<]*</definedName>',
+                            '', content)
+                        # Clean up empty definedNames tag if all entries removed
+                        content = re.sub(r'<definedNames>\s*</definedNames>', '', content)
+                        data = content.encode('utf-8')
+                    zout.writestr(item, data)
+        shutil.move(temp_path, filepath)
+    except Exception as e:
+        print(f"Warning: Could not remove _FilterDatabase from {filepath}: {e}")
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+
+
 def apply_border_box(sheet, min_row, min_col, max_row, max_col, style='thin'):
     """Apply a border box around a rectangular range of cells."""
     side = Side(style=style)
@@ -3425,8 +3460,8 @@ End Sub
                 except:
                     pass
 
-                wb.defined_names.add(DefinedName('SourcePL', attr_text=f"Source_PL!$A$1:${get_column_letter(pl_last_col)}${pl_last_row}"))
-                wb.defined_names.add(DefinedName('SourceBS', attr_text=f"Source_BS!$A$1:${get_column_letter(bs_last_col)}${bs_last_row}"))
+                wb.defined_names.add(DefinedName('SourcePL', attr_text=f"'Source_PL'!$A$1:${get_column_letter(pl_last_col)}${pl_last_row}"))
+                wb.defined_names.add(DefinedName('SourceBS', attr_text=f"'Source_BS'!$A$1:${get_column_letter(bs_last_col)}${bs_last_row}"))
 
                 # Get the latest month added
                 latest_month = new_month_list[-1]
@@ -3533,6 +3568,9 @@ End Sub
                 # Save
                 update_step("Saving workbook...")
                 wb.save(temp_path)
+
+                # Remove legacy _FilterDatabase from saved file
+                remove_filter_database_from_xlsx(temp_path)
                 pass  # openpyxl auto-handles cleanup
 
             finally:
@@ -4890,6 +4928,9 @@ End Sub
             # openpyxl: no calculation mode needed
             update_substep("Writing to disk (this may take a moment)...")
             wb.save(temp_path)
+
+            # Remove legacy _FilterDatabase from saved file
+            remove_filter_database_from_xlsx(temp_path)
             update_substep("Closing workbook...")
             pass  # openpyxl auto-handles cleanup
             wb = None
@@ -6137,9 +6178,9 @@ End Sub
             bs_last_col = len(pl_months) + 1  # BS uses same number of month columns
             budget_last_col = 13  # Source_Budget: col A (accounts) + cols B-M (12 months)
             budget_last_row = len(pl_accounts) + 5  # +5 for header rows in budget sheet
-            wb.defined_names.add(DefinedName('SourcePL', attr_text=f"Source_PL!$A$1:${get_column_letter(pl_last_col)}${pl_last_row}"))
-            wb.defined_names.add(DefinedName('SourceBS', attr_text=f"Source_BS!$A$1:${get_column_letter(bs_last_col)}${bs_last_row}"))
-            wb.defined_names.add(DefinedName('SourceBudget', attr_text=f"Source_Budget!$A$1:${get_column_letter(budget_last_col)}${budget_last_row}"))
+            wb.defined_names.add(DefinedName('SourcePL', attr_text=f"'Source_PL'!$A$1:${get_column_letter(pl_last_col)}${pl_last_row}"))
+            wb.defined_names.add(DefinedName('SourceBS', attr_text=f"'Source_BS'!$A$1:${get_column_letter(bs_last_col)}${bs_last_row}"))
+            wb.defined_names.add(DefinedName('SourceBudget', attr_text=f"'Source_Budget'!$A$1:${get_column_letter(budget_last_col)}${budget_last_row}"))
 
             # Create Menu sheet
             update_step("Creating Menu sheet...")
@@ -6272,6 +6313,12 @@ End Sub
             # Save the workbook
             update_step("Saving workbook...")
             wb.save(temp_path)
+
+            # Remove legacy _FilterDatabase defined names from saved file.
+            # openpyxl creates both a sheet-level <autoFilter> and a workbook-level
+            # _xlnm._FilterDatabase named range. Excel flags the duplicate as
+            # "Removed Records: Named range" during repair.
+            remove_filter_database_from_xlsx(temp_path)
             pass  # openpyxl auto-handles cleanup
             wb = None
 
